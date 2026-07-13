@@ -102,7 +102,7 @@ def _render_state(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     direction = _look_direction(state.yaw_deg, state.pitch_deg)
     target = state.position + direction
-    return render_camera_view(intrinsics, state.position, target, line_thickness=4)
+    return render_camera_view(intrinsics, state.position, target)
 
 
 def _apply_keyboard(state: ViewerState, dt: float) -> None:

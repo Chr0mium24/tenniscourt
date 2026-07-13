@@ -6,7 +6,11 @@ import cv2
 import numpy as np
 
 from tenniscourt.camera import CameraIntrinsics, look_at_rvec_tvec, points_in_front, project_points
-from tenniscourt.court import sample_line_points, tennis_court_lines
+from tenniscourt.court import DOUBLES_WIDTH_M, sample_line_points, sample_line_strip, tennis_court_lines
+
+
+NET_HEIGHT_CENTER_M = 0.914
+NET_HEIGHT_POST_M = 1.07
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,7 @@ def render_sample(
     position, target, roll = _sample_camera_pose(rng, bounds)
     rvec, tvec, rotation = look_at_rvec_tvec(position, target, roll)
     visible_lines = _draw_projected_lines(rng, image, mask, intrinsics, rvec, tvec, rotation)
+    net_segments = _draw_projected_net(image, mask, intrinsics, rvec, tvec, rotation)
     _apply_shadows(rng, image)
     _apply_occluders(rng, image, mask)
     image = _apply_photo_noise(rng, image)
@@ -45,6 +50,7 @@ def render_sample(
         "rvec": rvec.reshape(-1).round(8).tolist(),
         "tvec": tvec.reshape(-1).round(8).tolist(),
         "lines": visible_lines,
+        "net_segments": net_segments,
     }
     return image, mask, label
 
@@ -56,7 +62,6 @@ def render_camera_view(
     roll_deg: float = 0.0,
     background_bgr: tuple[int, int, int] = (54, 118, 75),
     line_bgr: tuple[int, int, int] = (245, 245, 245),
-    line_thickness: int = 4,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     image = np.full((intrinsics.height, intrinsics.width, 3), background_bgr, dtype=np.uint8)
     mask = np.zeros((intrinsics.height, intrinsics.width), dtype=np.uint8)
@@ -69,8 +74,8 @@ def render_camera_view(
         tvec=tvec,
         rotation=rotation,
         line_bgr=line_bgr,
-        thickness=line_thickness,
     )
+    net_segments = _draw_projected_net(image, mask, intrinsics, rvec, tvec, rotation)
     label = {
         "camera": intrinsics.as_json(),
         "position_world_m": np.asarray(position).round(6).tolist(),
@@ -79,6 +84,7 @@ def render_camera_view(
         "rvec": rvec.reshape(-1).round(8).tolist(),
         "tvec": tvec.reshape(-1).round(8).tolist(),
         "lines": visible_lines,
+        "net_segments": net_segments,
     }
     return image, mask, label
 
@@ -115,16 +121,10 @@ def _draw_projected_lines(
 ) -> list[dict[str, object]]:
     line_color = int(rng.integers(210, 255))
     rgb_line = (line_color, line_color, line_color)
-    thickness = int(rng.integers(2, 5))
     visible_lines: list[dict[str, object]] = []
 
     for line in tennis_court_lines():
-        points_3d = sample_line_points(line, samples=96)
-        in_front = points_in_front(points_3d, rotation, tvec)
-        points_2d = project_points(points_3d, intrinsics, rvec, tvec)
-        inside = _inside_image(points_2d, intrinsics.width, intrinsics.height, margin=16)
-        valid = in_front & inside
-        polyline = _draw_valid_polyline(image, mask, points_2d, valid, rgb_line, thickness)
+        polyline = _draw_projected_line_strip(image, mask, line, intrinsics, rvec, tvec, rotation, rgb_line)
         if len(polyline) >= 2:
             visible_lines.append({"name": line.name, "polyline": polyline})
 
@@ -139,59 +139,189 @@ def _draw_projected_lines_styled(
     tvec: np.ndarray,
     rotation: np.ndarray,
     line_bgr: tuple[int, int, int],
-    thickness: int,
 ) -> list[dict[str, object]]:
     visible_lines: list[dict[str, object]] = []
     for line in tennis_court_lines():
-        points_3d = sample_line_points(line, samples=128)
-        in_front = points_in_front(points_3d, rotation, tvec)
-        points_2d = project_points(points_3d, intrinsics, rvec, tvec)
-        inside = _inside_image(points_2d, intrinsics.width, intrinsics.height, margin=16)
-        valid = in_front & inside
-        polyline = _draw_valid_polyline(image, mask, points_2d, valid, line_bgr, thickness)
+        polyline = _draw_projected_line_strip(image, mask, line, intrinsics, rvec, tvec, rotation, line_bgr)
         if len(polyline) >= 2:
             visible_lines.append({"name": line.name, "polyline": polyline})
     return visible_lines
 
 
-def _inside_image(points: np.ndarray, width: int, height: int, margin: int) -> np.ndarray:
-    return (
-        (points[:, 0] >= -margin)
-        & (points[:, 0] < width + margin)
-        & (points[:, 1] >= -margin)
-        & (points[:, 1] < height + margin)
-    )
-
-
-def _draw_valid_polyline(
+def _draw_projected_line_strip(
     image: np.ndarray,
     mask: np.ndarray,
+    line: object,
+    intrinsics: CameraIntrinsics,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    rotation: np.ndarray,
+    line_bgr: tuple[int, int, int],
+) -> list[list[float]]:
+    center = sample_line_points(line, samples=128)
+    edge_a, edge_b = sample_line_strip(line, samples=128)
+    valid = _valid_projected_points(center, rotation, tvec)
+    center_2d = project_points(center, intrinsics, rvec, tvec)
+    edge_a_2d = project_points(edge_a, intrinsics, rvec, tvec)
+    edge_b_2d = project_points(edge_b, intrinsics, rvec, tvec)
+    valid &= (
+        np.isfinite(center_2d).all(axis=1)
+        & np.isfinite(edge_a_2d).all(axis=1)
+        & np.isfinite(edge_b_2d).all(axis=1)
+    )
+
+    for run in _valid_runs(valid):
+        if len(run) < 2:
+            continue
+        polygon = np.vstack([edge_a_2d[run], edge_b_2d[run][::-1]])
+        polygon_i32 = _clamped_polygon(polygon, intrinsics.width, intrinsics.height)
+        cv2.fillPoly(image, [polygon_i32], line_bgr, lineType=cv2.LINE_AA)
+        cv2.fillPoly(mask, [polygon_i32], 255, lineType=cv2.LINE_AA)
+
+    return _collect_clipped_polyline(center_2d, valid, intrinsics.width, intrinsics.height)
+
+
+def _draw_projected_net(
+    image: np.ndarray,
+    mask: np.ndarray,
+    intrinsics: CameraIntrinsics,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    rotation: np.ndarray,
+) -> list[list[list[float]]]:
+    segments_3d = _net_segments_3d()
+    visible_segments: list[list[list[float]]] = []
+    for points_3d in segments_3d:
+        valid = _valid_projected_points(points_3d, rotation, tvec)
+        points_2d = project_points(points_3d, intrinsics, rvec, tvec)
+        valid &= np.isfinite(points_2d).all(axis=1)
+        clipped = _draw_clipped_polyline(
+            image=image,
+            mask=mask,
+            points_2d=points_2d,
+            valid=valid,
+            color=(35, 35, 35),
+            mask_value=0,
+            thickness=1,
+        )
+        if len(clipped) >= 2:
+            visible_segments.append(clipped)
+    return visible_segments
+
+
+def _net_segments_3d() -> list[np.ndarray]:
+    half_width = DOUBLES_WIDTH_M / 2.0
+    x_values = np.linspace(-half_width, half_width, 23, dtype=np.float32)
+    segments: list[np.ndarray] = []
+
+    top = np.array([[x, 0.0, _net_top_z(float(x), half_width)] for x in x_values], dtype=np.float32)
+    segments.append(top)
+
+    for x in x_values:
+        top_z = _net_top_z(float(x), half_width)
+        segments.append(np.array([[x, 0.0, 0.04], [x, 0.0, top_z]], dtype=np.float32))
+
+    for ratio in [0.25, 0.5, 0.75]:
+        row = np.array([[x, 0.0, _net_top_z(float(x), half_width) * ratio] for x in x_values], dtype=np.float32)
+        segments.append(row)
+    return segments
+
+
+def _net_top_z(x: float, half_width: float) -> float:
+    edge_weight = min(1.0, abs(x) / max(half_width, 1e-6))
+    return NET_HEIGHT_CENTER_M + (NET_HEIGHT_POST_M - NET_HEIGHT_CENTER_M) * edge_weight**2
+
+
+def _valid_projected_points(points_3d: np.ndarray, rotation: np.ndarray, tvec: np.ndarray) -> np.ndarray:
+    in_front = points_in_front(points_3d, rotation, tvec)
+    return in_front & np.isfinite(points_3d).all(axis=1)
+
+
+def _valid_runs(valid: np.ndarray) -> list[np.ndarray]:
+    runs: list[np.ndarray] = []
+    start: int | None = None
+    for index, is_valid in enumerate(valid):
+        if is_valid and start is None:
+            start = index
+        elif not is_valid and start is not None:
+            runs.append(np.arange(start, index))
+            start = None
+    if start is not None:
+        runs.append(np.arange(start, len(valid)))
+    return runs
+
+
+def _clamped_polygon(points: np.ndarray, width: int, height: int) -> np.ndarray:
+    limit = float(max(width, height) * 8)
+    clipped = np.clip(points, -limit, limit)
+    return np.round(clipped).astype(np.int32)
+
+
+def _collect_clipped_polyline(
     points_2d: np.ndarray,
     valid: np.ndarray,
-    rgb_line: tuple[int, int, int],
-    thickness: int,
+    width: int,
+    height: int,
 ) -> list[list[float]]:
-    visible: list[list[float]] = []
-    last_point: tuple[int, int] | None = None
+    return _draw_clipped_polyline(None, None, points_2d, valid, (0, 0, 0), 0, 1, width, height)
 
-    for point, is_valid in zip(points_2d, valid, strict=True):
-        current = (int(round(point[0])), int(round(point[1])))
-        if is_valid:
-            visible.append([round(float(point[0]), 3), round(float(point[1]), 3)])
-            if last_point is not None and _segment_reasonable(last_point, current):
-                cv2.line(image, last_point, current, rgb_line, thickness, lineType=cv2.LINE_AA)
-                cv2.line(mask, last_point, current, 255, thickness, lineType=cv2.LINE_AA)
-            last_point = current
-        else:
-            last_point = None
+
+def _draw_clipped_polyline(
+    image: np.ndarray | None,
+    mask: np.ndarray | None,
+    points_2d: np.ndarray,
+    valid: np.ndarray,
+    color: tuple[int, int, int],
+    mask_value: int,
+    thickness: int,
+    width: int | None = None,
+    height: int | None = None,
+) -> list[list[float]]:
+    if width is None or height is None:
+        if image is None:
+            raise ValueError("width and height are required without an image")
+        height, width = image.shape[:2]
+
+    visible: list[list[float]] = []
+    rect = (0, 0, int(width), int(height))
+
+    for index in range(len(points_2d) - 1):
+        if not (valid[index] and valid[index + 1]):
+            continue
+        p0 = _safe_int_point(points_2d[index], width, height)
+        p1 = _safe_int_point(points_2d[index + 1], width, height)
+        if not _segment_reasonable(p0, p1, width, height):
+            continue
+        ok, clipped0, clipped1 = cv2.clipLine(rect, p0, p1)
+        if not ok:
+            continue
+        if image is not None:
+            cv2.line(image, clipped0, clipped1, color, thickness, lineType=cv2.LINE_AA)
+        if mask is not None:
+            cv2.line(mask, clipped0, clipped1, mask_value, thickness, lineType=cv2.LINE_AA)
+        _append_visible_point(visible, clipped0)
+        _append_visible_point(visible, clipped1)
 
     return visible
 
 
-def _segment_reasonable(a: tuple[int, int], b: tuple[int, int]) -> bool:
+def _safe_int_point(point: np.ndarray, width: int, height: int) -> tuple[int, int]:
+    limit = max(width, height) * 8
+    clipped = np.clip(point, -limit, limit)
+    return int(round(float(clipped[0]))), int(round(float(clipped[1])))
+
+
+def _segment_reasonable(a: tuple[int, int], b: tuple[int, int], width: int, height: int) -> bool:
     dx = a[0] - b[0]
     dy = a[1] - b[1]
-    return dx * dx + dy * dy < 200 * 200
+    max_len = max(width, height) * 4
+    return dx * dx + dy * dy < max_len * max_len
+
+
+def _append_visible_point(polyline: list[list[float]], point: tuple[int, int]) -> None:
+    current = [float(point[0]), float(point[1])]
+    if not polyline or polyline[-1] != current:
+        polyline.append(current)
 
 
 def _court_background(rng: np.random.Generator, width: int, height: int) -> np.ndarray:

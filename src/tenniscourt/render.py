@@ -7,6 +7,13 @@ import numpy as np
 
 from tenniscourt.camera import CameraIntrinsics, look_at_rvec_tvec, points_in_front, project_points, scale_intrinsics
 from tenniscourt.court import DOUBLES_WIDTH_M, sample_line_points, sample_line_strip, tennis_court_lines
+from tenniscourt.projection_clip import (
+    clip_polygon_near,
+    clip_polygon_to_image,
+    clip_polyline_near,
+    project_pinhole_camera,
+    world_to_camera,
+)
 
 
 NET_HEIGHT_CENTER_M = 0.914
@@ -167,9 +174,11 @@ def _draw_projected_line_strip(
     rotation: np.ndarray,
     line_bgr: tuple[int, int, int],
 ) -> list[list[float]]:
-    samples = 2 if _projects_as_straight_strip(intrinsics) else 128
-    center = sample_line_points(line, samples=samples)
-    edge_a, edge_b = sample_line_strip(line, samples=samples)
+    if _projects_as_straight_strip(intrinsics):
+        return _draw_pinhole_line_strip(image, mask, line, intrinsics, rotation, tvec, line_bgr)
+
+    center = sample_line_points(line, samples=128)
+    edge_a, edge_b = sample_line_strip(line, samples=128)
     valid = _valid_projected_points(center, rotation, tvec)
     center_2d = project_points(center, intrinsics, rvec, tvec)
     edge_a_2d = project_points(edge_a, intrinsics, rvec, tvec)
@@ -183,18 +192,51 @@ def _draw_projected_line_strip(
     for run in _valid_runs(valid):
         if len(run) < 2:
             continue
-        if _projects_as_straight_strip(intrinsics):
-            polygon = np.array(
-                [edge_a_2d[run[0]], edge_a_2d[run[-1]], edge_b_2d[run[-1]], edge_b_2d[run[0]]],
-                dtype=np.float64,
-            )
-        else:
-            polygon = np.vstack([edge_a_2d[run], edge_b_2d[run][::-1]])
-        polygon_i32 = _clamped_polygon(polygon, intrinsics.width, intrinsics.height)
-        cv2.fillPoly(image, [polygon_i32], line_bgr, lineType=cv2.LINE_AA)
-        cv2.fillPoly(mask, [polygon_i32], 255, lineType=cv2.LINE_AA)
+        polygon = np.vstack([edge_a_2d[run], edge_b_2d[run][::-1]])
+        _fill_projected_polygon(image, mask, polygon, intrinsics.width, intrinsics.height, line_bgr)
 
     return _collect_clipped_polyline(center_2d, valid, intrinsics.width, intrinsics.height)
+
+
+def _draw_pinhole_line_strip(
+    image: np.ndarray,
+    mask: np.ndarray,
+    line: object,
+    intrinsics: CameraIntrinsics,
+    rotation: np.ndarray,
+    tvec: np.ndarray,
+    line_bgr: tuple[int, int, int],
+) -> list[list[float]]:
+    center = sample_line_points(line, samples=2)
+    edge_a, edge_b = sample_line_strip(line, samples=2)
+    strip_world = np.array([edge_a[0], edge_a[-1], edge_b[-1], edge_b[0]], dtype=np.float64)
+    strip_camera = clip_polygon_near(world_to_camera(strip_world, rotation, tvec))
+    if len(strip_camera) >= 3:
+        polygon_2d = project_pinhole_camera(strip_camera, intrinsics)
+        _fill_projected_polygon(image, mask, polygon_2d, intrinsics.width, intrinsics.height, line_bgr)
+
+    center_camera = clip_polyline_near(world_to_camera(center, rotation, tvec))
+    if len(center_camera) < 2:
+        return []
+    center_2d = project_pinhole_camera(center_camera, intrinsics)
+    valid = np.ones(len(center_2d), dtype=bool)
+    return _collect_clipped_polyline(center_2d, valid, intrinsics.width, intrinsics.height)
+
+
+def _fill_projected_polygon(
+    image: np.ndarray,
+    mask: np.ndarray,
+    polygon_2d: np.ndarray,
+    width: int,
+    height: int,
+    line_bgr: tuple[int, int, int],
+) -> None:
+    clipped = clip_polygon_to_image(polygon_2d, width, height)
+    if len(clipped) < 3:
+        return
+    polygon_i32 = np.round(clipped).astype(np.int32)
+    cv2.fillPoly(image, [polygon_i32], line_bgr, lineType=cv2.LINE_AA)
+    cv2.fillPoly(mask, [polygon_i32], 255, lineType=cv2.LINE_AA)
 
 
 def _projects_as_straight_strip(intrinsics: CameraIntrinsics) -> bool:
@@ -269,12 +311,6 @@ def _valid_runs(valid: np.ndarray) -> list[np.ndarray]:
     if start is not None:
         runs.append(np.arange(start, len(valid)))
     return runs
-
-
-def _clamped_polygon(points: np.ndarray, width: int, height: int) -> np.ndarray:
-    limit = float(max(width, height) * 8)
-    clipped = np.clip(points, -limit, limit)
-    return np.round(clipped).astype(np.int32)
 
 
 def _collect_clipped_polyline(

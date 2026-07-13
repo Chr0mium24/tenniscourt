@@ -21,12 +21,20 @@ outputs/.../labels/*.json
 
 - RGB 图像；
 - 二值 court line mask。
-- JSON 里的 keypoints，如果旧数据没有 keypoints，则根据相机参数动态投影生成。
+- JSON 里的 keypoints，如果旧数据没有 keypoints，则根据相机参数动态投影生成；
+- 每个 keypoint 的可见性标记，用于避免不可见点的全黑 heatmap 主导 loss。
 
 训练脚本 `src/tenniscourt/train.py` 使用：
 
 - mask：`BCEWithLogitsLoss + dice_loss`；
-- keypoint heatmap：`BCEWithLogitsLoss`。
+- keypoint heatmap：默认 `weighted-mse`，只对可见 keypoint 通道计算，并对 GT gaussian 峰值附近加权；
+- 可选 `weighted-bce`，同样使用可见点 mask 和正样本加权；
+- 默认 best checkpoint 按 `val_keypoint_peak_error_px` 最小值保存。
+
+训练脚本还支持：
+
+- `--resume`：从已有 checkpoint 继续训练；
+- `--viz-count`：保存 keypoint 预测可视化，红点为 GT，绿点为预测 peak。
 
 ## JSON 标签的作用
 

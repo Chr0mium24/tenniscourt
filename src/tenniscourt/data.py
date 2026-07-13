@@ -11,7 +11,7 @@ from torch.utils.data import Dataset
 from tenniscourt.keypoints import heatmaps_from_keypoints, project_keypoints_from_label
 
 
-class LineMaskDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
+class LineMaskDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):
     def __init__(
         self,
         pairs: list[tuple[Path, Path, Path]],
@@ -25,7 +25,7 @@ class LineMaskDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
     def __len__(self) -> int:
         return len(self.pairs)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         image_path, mask_path, label_path = self.pairs[index]
         image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
@@ -42,13 +42,16 @@ class LineMaskDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
             height, width = mask.shape
 
         label = json.loads(label_path.read_text(encoding="utf-8"))
-        heatmaps = _heatmaps_from_label(label, width, height, self.heatmap_sigma)
+        keypoints = _keypoints_from_label(label, width, height)
+        heatmaps = heatmaps_from_keypoints(keypoints, width=width, height=height, sigma_px=self.heatmap_sigma)
+        visible = np.asarray([bool(keypoint.get("visible", False)) for keypoint in keypoints], dtype=np.float32)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         mask = (mask.astype(np.float32) / 255.0) > 0.5
         image_tensor = torch.from_numpy(image).permute(2, 0, 1).contiguous()
         mask_tensor = torch.from_numpy(mask.astype(np.float32))[None, :, :]
         heatmap_tensor = torch.from_numpy(heatmaps).contiguous()
-        return image_tensor, mask_tensor, heatmap_tensor
+        visible_tensor = torch.from_numpy(visible)
+        return image_tensor, mask_tensor, heatmap_tensor, visible_tensor
 
 
 def list_image_mask_pairs(data_dir: Path) -> list[tuple[Path, Path, Path]]:
@@ -83,12 +86,17 @@ def split_pairs(
 
 
 def _heatmaps_from_label(label: dict[str, object], width: int, height: int, sigma_px: float) -> np.ndarray:
+    keypoints = _keypoints_from_label(label, width, height)
+    return heatmaps_from_keypoints(keypoints, width=width, height=height, sigma_px=sigma_px)
+
+
+def _keypoints_from_label(label: dict[str, object], width: int, height: int) -> list[dict[str, object]]:
     keypoints = label.get("keypoints")
     if keypoints is None:
         keypoints = project_keypoints_from_label(label)
     if label["camera"]["width"] != width or label["camera"]["height"] != height:
         keypoints = _rescale_keypoints(keypoints, label["camera"]["width"], label["camera"]["height"], width, height)
-    return heatmaps_from_keypoints(keypoints, width=width, height=height, sigma_px=sigma_px)
+    return keypoints
 
 
 def _rescale_keypoints(

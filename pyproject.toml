@@ -21,6 +21,7 @@ viewer = [
 [project.scripts]
 tenniscourt-generate = "tenniscourt.generate:main"
 tenniscourt-train = "tenniscourt.train:main"
+tenniscourt-eval-pose = "tenniscourt.evaluate_pose:main"
 tenniscourt-viewer = "tenniscourt.viewer:main"
 
 [build-system]

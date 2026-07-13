@@ -185,3 +185,124 @@ epoch=5 train_loss=4.2181 mask_loss=1.5246 heatmap_loss=0.2043 visibility_loss=0
 - 低学习率 resume 链路正常；
 - checkpoint partial/full load 正常；
 - 可以按 v6 方案启动远端训练。
+
+## 远端 v6 训练结果
+
+远端机器：`anilam@10.31.151.120`
+远端路径：`/home/anilam/Codes/tenniscourt`
+训练输出：`runs/heatmap-10000-v6-low-lr-hard`
+评估输出：`runs/pose-eval-10000-v6-low-lr-hard-final`
+
+训练正常结束：
+
+```text
+TRAIN_V6_LOW_LR_HARD_EXIT:0
+best_epoch=114 best_val_kp_px=5.59
+```
+
+训练后期指标：
+
+| epoch | train loss | val IoU | val keypoint px | val visibility acc |
+| ---: | ---: | ---: | ---: | ---: |
+| 107 | 0.0626 | 0.9634 | 5.87 | 0.9821 |
+| 108 | 0.0621 | 0.9632 | 6.30 | 0.9818 |
+| 109 | 0.0615 | 0.9633 | 5.62 | 0.9813 |
+| 110 | 0.0611 | 0.9634 | 5.80 | 0.9819 |
+| 111 | 0.0613 | 0.9634 | 5.72 | 0.9809 |
+| 112 | 0.0608 | 0.9636 | 5.64 | 0.9818 |
+| 113 | 0.0602 | 0.9634 | 5.93 | 0.9819 |
+| 114 | 0.0600 | 0.9638 | 5.59 | 0.9812 |
+
+best 出现在最后一轮，说明低学习率继续训练仍有效，没有明显过拟合迹象。
+
+## 远端 v6 pose eval
+
+使用 `selection-score=combined`、`peak-threshold=0.5`、`pnp-solver=ippe`。
+
+| 指标 | v5 | v6 |
+| --- | ---: | ---: |
+| train best val keypoint error | 7.48 px | 5.59 px |
+| sample mean keypoint error | 7.23 px | 5.49 px |
+| sample median / p95 | 1.55 px / 32.91 px | 1.41 px / 28.24 px |
+| visible-point mean | 7.41 px | 5.48 px |
+| visible-point median | 0.89 px | 0.87 px |
+| visible-point p90 | 4.50 px | 3.98 px |
+| visible-point p95 | 10.61 px | 7.90 px |
+| visible-point p99 | 189.64 px | 122.39 px |
+| visible points <= 5px | 91.03% | 92.03% |
+| visible points > 50px | 3.62% | 2.68% |
+| score-gated PnP success | 95.50% | 96.35% |
+| position error median / p95 | 0.176 m / 0.857 m | 0.158 m / 0.866 m |
+| rotation error median / p95 | 0.418° / 2.269° | 0.409° / 2.263° |
+| inlier reproj median / p95 | 0.949 px / 2.476 px | 0.924 px / 2.646 px |
+
+v6 达到了接近 `5px` mean 的阶段：visible-point mean 为 `5.48px`，p90 已经低于 `4px`，但仍有 `2.68%` 的 `>50px` 长尾。
+
+## v6 threshold scan
+
+checkpoint：`runs/heatmap-10000-v6-low-lr-hard/best.pt`
+`selection-score=combined`
+
+| threshold | selected median | success | position median | position p95 | rotation median | rotation p95 | reproj median | reproj p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.2 | 8 | 96.05% | 0.158 m | 0.843 m | 0.412° | 2.254° | 0.939 px | 2.678 px |
+| 0.3 | 8 | 96.05% | 0.160 m | 0.854 m | 0.412° | 2.256° | 0.936 px | 2.678 px |
+| 0.4 | 8 | 96.05% | 0.159 m | 0.866 m | 0.411° | 2.270° | 0.931 px | 2.678 px |
+| 0.5 | 8 | 96.35% | 0.158 m | 0.866 m | 0.409° | 2.263° | 0.924 px | 2.646 px |
+| 0.6 | 7 | 95.70% | 0.157 m | 0.816 m | 0.403° | 2.110° | 0.902 px | 2.485 px |
+| 0.7 | 7 | 93.90% | 0.154 m | 0.803 m | 0.400° | 2.081° | 0.868 px | 2.271 px |
+
+部署默认仍建议 `threshold=0.5`，它给出最高成功率。若更重视 p95 稳定性而能接受更多失败，`0.7` 更保守。
+
+## v6 剩余问题
+
+v6 最差 keypoint：
+
+| keypoint | visible count | v5 mean | v6 mean | v6 median | v6 p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| near_right_doubles_corner | 4 | 271.47 px | 326.53 px | 397.81 px | 495.27 px |
+| near_left_doubles_corner | 2 | 14.15 px | 173.92 px | 173.92 px | 315.86 px |
+| near_right_singles_corner | 12 | 82.87 px | 92.65 px | 5.74 px | 319.34 px |
+| left_near_service_corner | 615 | 8.81 px | 17.81 px | 0.92 px | 117.41 px |
+| right_near_service_corner | 647 | 39.03 px | 11.77 px | 0.77 px | 4.57 px |
+| center_near_service_t | 821 | 29.22 px | 8.02 px | 0.63 px | 3.44 px |
+| far_right_singles_corner | 1956 | 5.76 px | 5.32 px | 0.92 px | 30.66 px |
+
+v6 明显修复了：
+
+- `right_near_service_corner`: mean `39.03 -> 11.77`
+- `center_near_service_t`: mean `29.22 -> 8.02`
+
+但代价是：
+
+- `left_near_service_corner` 长尾变差；
+- 极少数近端 corner 仍然不稳定。
+
+这说明继续靠静态 per-channel 权重会产生 tradeoff。下一步如果要稳定进入 `5px` mean 以下，优先不应继续单纯把某些点权重加大，而应加入 hard-case 采样或几何一致性约束。
+
+## 下一步建议
+
+优先级：
+
+1. v7 使用更平衡的 hard weights，继续低学习率。
+   建议从 v6 best 继续，`lr=5e-5`，把 `left_near_service_corner` 权重提高，同时不要继续提高已经修复的 `right_near_service_corner` 和 `center_near_service_t`。
+
+   候选权重：
+
+   ```text
+   1,2,1,1,1,4,2,1,6,6,1,1,6,2
+   ```
+
+2. 实现 hard-case oversampling。
+   根据 label 中的可见 keypoint 统计，提高这些样本采样概率：
+
+   - near left/right service corners 可见；
+   - near singles/doubles corners 可见；
+   - center service T 可见；
+   - 强透视、远端线角靠近的样本。
+
+3. 几何后处理。
+   对每个 keypoint channel 解 top-k 候选，然后用球场几何/PnP RANSAC 选择全局一致点。当前剩余问题是少数 wrong peak，后处理会比继续压 heatmap loss 更直接。
+
+4. 再考虑更大模型或更高分辨率。
+   如果 v7 + oversampling 仍卡在 `5px` 左右，再试 `base_channels=32` 或 `960x540`。

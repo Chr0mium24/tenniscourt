@@ -95,7 +95,8 @@ def _evaluate_sample(
     gt_keypoints = label.get("keypoints") or project_keypoints_from_label(label)
     gt_xy = np.asarray([kp["xy"] for kp in gt_keypoints], dtype=np.float64)
     gt_visible = np.asarray([bool(kp.get("visible", False)) for kp in gt_keypoints], dtype=bool)
-    visible_errors = np.linalg.norm(decoded_xy[gt_visible] - gt_xy[gt_visible], axis=1)
+    all_errors = np.linalg.norm(decoded_xy - gt_xy, axis=1)
+    visible_errors = all_errors[gt_visible]
     camera = _camera_from_label(label)
     gt_rvec = np.asarray(label["rvec"], dtype=np.float64).reshape(3, 1)
     gt_tvec = np.asarray(label["tvec"], dtype=np.float64).reshape(3, 1)
@@ -132,6 +133,8 @@ def _evaluate_sample(
         "keypoint_error_mean_px": float(visible_errors.mean()) if visible_errors.size else None,
         "keypoint_error_median_px": float(np.median(visible_errors)) if visible_errors.size else None,
         "keypoint_error_p95_px": float(np.percentile(visible_errors, 95)) if visible_errors.size else None,
+        "keypoint_errors_px": [float(error) if visible else None for error, visible in zip(all_errors, gt_visible, strict=True)],
+        "peak_scores": [float(score) for score in scores],
         "peak_score_mean_visible": float(scores[gt_visible].mean()) if gt_visible.any() else None,
         "peak_score_min_visible": float(scores[gt_visible].min()) if gt_visible.any() else None,
         "pnp": {name: result.__dict__ for name, result in modes.items()},
@@ -326,6 +329,7 @@ def _summarize(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[
         "keypoint_error_px": _stats([row["keypoint_error_mean_px"] for row in rows]),
         "visible_keypoints": _stats([row["visible_keypoints"] for row in rows]),
         "score_selected_keypoints": _stats([row["score_selected_keypoints"] for row in rows]),
+        "per_keypoint_error_px": _per_keypoint_stats(rows),
     }
     for mode in ["oracle_visible", "score_gated"]:
         mode_rows = [row["pnp"][mode] for row in rows if mode in row["pnp"]]
@@ -341,6 +345,14 @@ def _summarize(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[
                 "rotation_error_deg": _stats([row["rotation_error_deg"] for row in ok_rows]),
             }
     return summary
+
+
+def _per_keypoint_stats(rows: list[dict[str, object]]) -> dict[str, dict[str, float | int | None]]:
+    names = keypoint_names()
+    result = {}
+    for index, name in enumerate(names):
+        result[name] = _stats([row["keypoint_errors_px"][index] for row in rows])
+    return result
 
 
 def _reject_reason_counts(rows: list[dict[str, object]]) -> dict[str, int]:
@@ -399,7 +411,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--heatmap-sigma", type=float, default=3.0)
-    parser.add_argument("--peak-threshold", type=float, default=0.25)
+    parser.add_argument("--peak-threshold", type=float, default=0.7)
     parser.add_argument("--pnp-mode", choices=["oracle-visible", "score-gated", "both"], default="both")
     parser.add_argument("--pnp-solver", choices=["epnp", "ippe", "iterative", "sqpnp"], default="ippe")
     parser.add_argument("--min-points", type=int, default=4)

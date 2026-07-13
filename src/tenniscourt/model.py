@@ -35,6 +35,8 @@ class TinyUNet(nn.Module):
         self.dec1 = ConvBlock(c2 + c1, c1)
         self.mask_head = nn.Conv2d(c1, 1, kernel_size=1)
         self.keypoint_head = nn.Conv2d(c1, keypoint_channels, kernel_size=1)
+        self.visibility_pool = nn.AdaptiveAvgPool2d(1)
+        self.visibility_head = nn.Linear(c1, keypoint_channels)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         e1 = self.enc1(x)
@@ -46,7 +48,12 @@ class TinyUNet(nn.Module):
         d2 = self.dec2(torch.cat([d2, e2], dim=1))
         d1 = F.interpolate(d2, size=e1.shape[-2:], mode="bilinear", align_corners=False)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
-        return {"mask": self.mask_head(d1), "keypoints": self.keypoint_head(d1)}
+        visibility_features = self.visibility_pool(d1).flatten(1)
+        return {
+            "mask": self.mask_head(d1),
+            "keypoints": self.keypoint_head(d1),
+            "visibility": self.visibility_head(visibility_features),
+        }
 
 
 def dice_loss(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

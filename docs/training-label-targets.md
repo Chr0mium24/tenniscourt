@@ -8,6 +8,7 @@
 
 - court line 二值 mask；
 - 14 个 court keypoint heatmap。
+- 14 个 keypoint visibility/confidence logits。
 
 训练数据读取路径：
 
@@ -29,6 +30,7 @@ outputs/.../labels/*.json
 - mask：`BCEWithLogitsLoss + dice_loss`；
 - keypoint heatmap：默认 `weighted-mse`，只对可见 keypoint 通道计算，并对 GT gaussian 峰值附近加权；
 - 可选 `weighted-bce`，同样使用可见点 mask 和正样本加权；
+- keypoint visibility：`BCEWithLogitsLoss`，监督每个 keypoint 是否可见；
 - 默认 best checkpoint 按 `val_keypoint_peak_error_px` 最小值保存。
 
 训练脚本还支持：

@@ -61,15 +61,17 @@ def train(args: argparse.Namespace, device: torch.device) -> None:
 
     metrics_path = args.out / "metrics.jsonl"
     for epoch in range(start_epoch, start_epoch + args.epochs):
-        train_loss, mask_loss, heatmap_loss = _train_epoch(model, train_loader, optimizer, bce, scaler, device, use_amp, args)
-        val_iou, val_kp_error = _validate(model, val_loader, device) if val_loader else (0.0, 0.0)
+        train_loss, mask_loss, heatmap_loss, visibility_loss = _train_epoch(model, train_loader, optimizer, bce, scaler, device, use_amp, args)
+        val_iou, val_kp_error, val_visibility_acc = _validate(model, val_loader, device, args) if val_loader else (0.0, 0.0, 0.0)
         row = {
             "epoch": epoch,
             "train_loss": train_loss,
             "mask_loss": mask_loss,
             "heatmap_loss": heatmap_loss,
+            "visibility_loss": visibility_loss,
             "val_iou": val_iou,
             "val_keypoint_peak_error_px": val_kp_error,
+            "val_visibility_acc": val_visibility_acc,
             "device": str(device),
             "heatmap_loss_name": args.heatmap_loss,
         }
@@ -98,7 +100,8 @@ def train(args: argparse.Namespace, device: torch.device) -> None:
         print(
             f"epoch={epoch} train_loss={train_loss:.4f} "
             f"mask_loss={mask_loss:.4f} heatmap_loss={heatmap_loss:.4f} "
-            f"val_iou={val_iou:.4f} val_kp_px={val_kp_error:.2f} device={device}"
+            f"visibility_loss={visibility_loss:.4f} val_iou={val_iou:.4f} "
+            f"val_kp_px={val_kp_error:.2f} val_vis_acc={val_visibility_acc:.4f} device={device}"
         )
 
 
@@ -111,11 +114,12 @@ def _train_epoch(
     device: torch.device,
     use_amp: bool,
     args: argparse.Namespace,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float]:
     model.train()
     total_loss = 0.0
     total_mask_loss = 0.0
     total_heatmap_loss = 0.0
+    total_visibility_loss = 0.0
     steps = 0
     iterator = tqdm(loader, desc="train", leave=False)
     for images, masks, heatmaps, keypoint_visible in iterator:
@@ -128,15 +132,18 @@ def _train_epoch(
             outputs = model(images)
             mask_logits = outputs["mask"]
             heatmap_logits = outputs["keypoints"]
+            visibility_logits = outputs["visibility"]
             mask_loss = bce(mask_logits, masks) + dice_loss(mask_logits, masks)
             heatmap_loss = _heatmap_loss(heatmap_logits, heatmaps, keypoint_visible, args)
-            loss = mask_loss + args.heatmap_loss_weight * heatmap_loss
+            visibility_loss = bce(visibility_logits, keypoint_visible)
+            loss = mask_loss + args.heatmap_loss_weight * heatmap_loss + args.visibility_loss_weight * visibility_loss
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         total_loss += float(loss.detach().cpu())
         total_mask_loss += float(mask_loss.detach().cpu())
         total_heatmap_loss += float(heatmap_loss.detach().cpu())
+        total_visibility_loss += float(visibility_loss.detach().cpu())
         steps += 1
         iterator.set_postfix(loss=total_loss / steps)
         if args.max_steps is not None and steps >= args.max_steps:
@@ -145,26 +152,31 @@ def _train_epoch(
         total_loss / max(steps, 1),
         total_mask_loss / max(steps, 1),
         total_heatmap_loss / max(steps, 1),
+        total_visibility_loss / max(steps, 1),
     )
 
 
 @torch.no_grad()
-def _validate(model: TinyUNet, loader: DataLoader | None, device: torch.device) -> tuple[float, float]:
+def _validate(model: TinyUNet, loader: DataLoader | None, device: torch.device, args: argparse.Namespace) -> tuple[float, float, float]:
     if loader is None:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     model.eval()
     total_iou = 0.0
     total_kp_error = 0.0
+    total_visibility_acc = 0.0
     steps = 0
-    for images, masks, heatmaps, _keypoint_visible in loader:
+    for images, masks, heatmaps, keypoint_visible in loader:
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
         heatmaps = heatmaps.to(device, non_blocking=True)
+        keypoint_visible = keypoint_visible.to(device, non_blocking=True)
         outputs = model(images)
         total_iou += float(mask_iou(outputs["mask"], masks).cpu())
         total_kp_error += float(heatmap_peak_error(outputs["keypoints"], heatmaps).cpu())
+        pred_visible = torch.sigmoid(outputs["visibility"]) >= args.visibility_threshold
+        total_visibility_acc += float((pred_visible == (keypoint_visible > 0.5)).float().mean().cpu())
         steps += 1
-    return total_iou / max(steps, 1), total_kp_error / max(steps, 1)
+    return total_iou / max(steps, 1), total_kp_error / max(steps, 1), total_visibility_acc / max(steps, 1)
 
 
 def _heatmap_loss(
@@ -194,10 +206,13 @@ def _load_checkpoint(
     args: argparse.Namespace,
 ) -> tuple[int, float]:
     checkpoint = _torch_load(path, device)
-    model.load_state_dict(checkpoint["model"])
-    if not args.reset_optimizer and "optimizer" in checkpoint:
+    incompatible = model.load_state_dict(checkpoint["model"], strict=False)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        print(f"partial checkpoint load missing={incompatible.missing_keys} unexpected={incompatible.unexpected_keys}")
+    can_load_optimizer = not incompatible.missing_keys and not incompatible.unexpected_keys
+    if can_load_optimizer and not args.reset_optimizer and "optimizer" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer"])
-    if not args.reset_optimizer and "scaler" in checkpoint:
+    if can_load_optimizer and not args.reset_optimizer and "scaler" in checkpoint:
         scaler.load_state_dict(checkpoint["scaler"])
     last_epoch = int(checkpoint.get("epoch") or checkpoint.get("metrics", {}).get("epoch", 0))
     best_score = _initial_best_score(args.best_metric)
@@ -316,6 +331,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--heatmap-loss", choices=["weighted-mse", "weighted-bce"], default="weighted-mse")
     parser.add_argument("--heatmap-loss-weight", type=float, default=5.0)
     parser.add_argument("--heatmap-pos-weight", type=float, default=50.0)
+    parser.add_argument("--visibility-loss-weight", type=float, default=1.0)
+    parser.add_argument("--visibility-threshold", type=float, default=0.5)
     parser.add_argument("--best-metric", choices=["val_iou", "val_keypoint_peak_error_px"], default="val_keypoint_peak_error_px")
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--reset-optimizer", action="store_true")

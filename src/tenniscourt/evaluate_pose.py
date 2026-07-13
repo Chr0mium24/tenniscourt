@@ -74,9 +74,16 @@ def _evaluate_batches(
     for images, _masks, _heatmaps, _visible in loader:
         outputs = model(images.to(device, non_blocking=True))
         heatmaps = torch.sigmoid(outputs["keypoints"]).cpu().numpy()
+        visibility_probs = torch.sigmoid(outputs["visibility"]).cpu().numpy() if "visibility" in outputs else None
         for item in range(images.shape[0]):
             label_path = pairs[offset + item][2]
-            row = _evaluate_sample(label_path, heatmaps[item], keypoints_3d, args)
+            row = _evaluate_sample(
+                label_path,
+                heatmaps[item],
+                None if visibility_probs is None else visibility_probs[item],
+                keypoints_3d,
+                args,
+            )
             rows.append(row)
             if args.max_samples is not None and len(rows) >= args.max_samples:
                 return rows
@@ -87,6 +94,7 @@ def _evaluate_batches(
 def _evaluate_sample(
     label_path: Path,
     heatmaps: np.ndarray,
+    visibility_probs: np.ndarray | None,
     keypoints_3d: np.ndarray,
     args: argparse.Namespace,
 ) -> dict[str, object]:
@@ -100,6 +108,7 @@ def _evaluate_sample(
     camera = _camera_from_label(label)
     gt_rvec = np.asarray(label["rvec"], dtype=np.float64).reshape(3, 1)
     gt_tvec = np.asarray(label["tvec"], dtype=np.float64).reshape(3, 1)
+    selection_scores = _selection_scores(scores, visibility_probs, args.selection_score)
 
     modes = {}
     if args.pnp_mode in {"oracle-visible", "both"}:
@@ -114,7 +123,7 @@ def _evaluate_sample(
             args,
         )
     if args.pnp_mode in {"score-gated", "both"}:
-        selected = scores >= args.peak_threshold
+        selected = selection_scores >= args.peak_threshold
         modes["score_gated"] = _solve_pose(
             keypoints_3d,
             decoded_xy,
@@ -129,16 +138,28 @@ def _evaluate_sample(
     return {
         "label": str(label_path),
         "visible_keypoints": int(gt_visible.sum()),
-        "score_selected_keypoints": int((scores >= args.peak_threshold).sum()),
+        "score_selected_keypoints": int((selection_scores >= args.peak_threshold).sum()),
         "keypoint_error_mean_px": float(visible_errors.mean()) if visible_errors.size else None,
         "keypoint_error_median_px": float(np.median(visible_errors)) if visible_errors.size else None,
         "keypoint_error_p95_px": float(np.percentile(visible_errors, 95)) if visible_errors.size else None,
         "keypoint_errors_px": [float(error) if visible else None for error, visible in zip(all_errors, gt_visible, strict=True)],
         "peak_scores": [float(score) for score in scores],
+        "visibility_probs": None if visibility_probs is None else [float(value) for value in visibility_probs],
+        "selection_scores": [float(score) for score in selection_scores],
         "peak_score_mean_visible": float(scores[gt_visible].mean()) if gt_visible.any() else None,
         "peak_score_min_visible": float(scores[gt_visible].min()) if gt_visible.any() else None,
         "pnp": {name: result.__dict__ for name, result in modes.items()},
     }
+
+
+def _selection_scores(peak_scores: np.ndarray, visibility_probs: np.ndarray | None, mode: str) -> np.ndarray:
+    if mode == "peak" or visibility_probs is None:
+        return peak_scores
+    if mode == "visibility":
+        return visibility_probs
+    if mode == "combined":
+        return peak_scores * visibility_probs
+    raise ValueError(f"unsupported selection score: {mode}")
 
 
 def decode_heatmap_peaks(heatmaps: np.ndarray, subpixel: bool = True) -> tuple[np.ndarray, np.ndarray]:
@@ -292,7 +313,9 @@ def _load_model(checkpoint_path: Path, base_channels: int, device: torch.device)
     if isinstance(checkpoint_args, dict) and "base_channels" in checkpoint_args:
         base_channels = int(checkpoint_args["base_channels"])
     model = TinyUNet(base_channels=base_channels, keypoint_channels=len(keypoint_names())).to(device)
-    model.load_state_dict(checkpoint["model"])
+    incompatible = model.load_state_dict(checkpoint["model"], strict=False)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        print(f"partial checkpoint load missing={incompatible.missing_keys} unexpected={incompatible.unexpected_keys}")
     return model
 
 
@@ -325,6 +348,7 @@ def _summarize(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[
         "split": args.split,
         "checkpoint": str(args.checkpoint),
         "peak_threshold": args.peak_threshold,
+        "selection_score": args.selection_score,
         "pnp_solver": args.pnp_solver,
         "keypoint_error_px": _stats([row["keypoint_error_mean_px"] for row in rows]),
         "visible_keypoints": _stats([row["visible_keypoints"] for row in rows]),
@@ -412,6 +436,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-channels", type=int, default=16)
     parser.add_argument("--heatmap-sigma", type=float, default=3.0)
     parser.add_argument("--peak-threshold", type=float, default=0.7)
+    parser.add_argument("--selection-score", choices=["peak", "visibility", "combined"], default="peak")
     parser.add_argument("--pnp-mode", choices=["oracle-visible", "score-gated", "both"], default="both")
     parser.add_argument("--pnp-solver", choices=["epnp", "ippe", "iterative", "sqpnp"], default="ippe")
     parser.add_argument("--min-points", type=int, default=4)

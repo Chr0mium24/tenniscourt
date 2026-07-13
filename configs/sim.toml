@@ -1,0 +1,14 @@
+[image]
+width = 640
+height = 360
+count = 1000
+
+[camera]
+model = "pinhole"
+fov_deg = 105.0
+height_min_m = 0.35
+height_max_m = 0.45
+
+[output]
+dir = "outputs/synth"
+seed = 7

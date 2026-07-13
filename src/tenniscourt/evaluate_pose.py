@@ -27,6 +27,7 @@ class PoseResult:
     mode: str
     used_points: int
     inliers: int
+    reject_reason: str | None
     reproj_error_px: float | None
     position_error_m: float | None
     rotation_error_deg: float | None
@@ -174,7 +175,7 @@ def _solve_pose(
 ) -> PoseResult:
     indices = np.flatnonzero(selected)
     if len(indices) < args.min_points:
-        return PoseResult(False, mode, int(len(indices)), 0, None, None, None)
+        return PoseResult(False, mode, int(len(indices)), 0, "not_enough_points", None, None, None)
     object_points = points_3d[indices].astype(np.float64)
     image_points = points_2d[indices].astype(np.float64)
     k, d, image_points = _pnp_camera_inputs(camera, image_points)
@@ -186,10 +187,10 @@ def _solve_pose(
         iterationsCount=args.ransac_iterations,
         reprojectionError=args.ransac_reproj_error,
         confidence=args.ransac_confidence,
-        flags=cv2.SOLVEPNP_EPNP,
+        flags=_pnp_flag(args.pnp_solver),
     )
     if not ok or rvec is None or tvec is None:
-        return PoseResult(False, mode, int(len(indices)), 0, None, None, None)
+        return PoseResult(False, mode, int(len(indices)), 0, "pnp_failed", None, None, None)
     inlier_count = 0 if inliers is None else int(len(inliers))
     if inliers is not None and len(inliers) >= args.min_points:
         inlier_object = object_points[inliers.reshape(-1)]
@@ -197,13 +198,17 @@ def _solve_pose(
         refined, rvec, tvec = cv2.solvePnP(inlier_object, inlier_image, k, d, rvec, tvec, True, cv2.SOLVEPNP_ITERATIVE)
         ok = bool(refined)
     if not ok:
-        return PoseResult(False, mode, int(len(indices)), inlier_count, None, None, None)
-    reproj_error = _reprojection_error(camera, points_3d[selected], points_2d[selected], rvec, tvec)
+        return PoseResult(False, mode, int(len(indices)), inlier_count, "refine_failed", None, None, None)
+    if not _pose_in_bounds(rvec, tvec, args):
+        return PoseResult(False, mode, int(len(indices)), inlier_count, "pose_out_of_bounds", None, None, None)
+    reproj_indices = indices if inliers is None or len(inliers) < args.min_points else indices[inliers.reshape(-1)]
+    reproj_error = _reprojection_error(camera, points_3d[reproj_indices], points_2d[reproj_indices], rvec, tvec)
     return PoseResult(
         True,
         mode,
         int(len(indices)),
         inlier_count,
+        None,
         reproj_error,
         _position_error(gt_rvec, gt_tvec, rvec, tvec),
         _rotation_error_deg(gt_rvec, rvec),
@@ -218,6 +223,25 @@ def _pnp_camera_inputs(
         normalized = cv2.fisheye.undistortPoints(points_2d.reshape(-1, 1, 2), camera.k, camera.d).reshape(-1, 2)
         return np.eye(3, dtype=np.float64), np.zeros((4, 1), dtype=np.float64), normalized
     return camera.k, camera.d, points_2d
+
+
+def _pnp_flag(name: str) -> int:
+    flags = {
+        "epnp": cv2.SOLVEPNP_EPNP,
+        "ippe": cv2.SOLVEPNP_IPPE,
+        "iterative": cv2.SOLVEPNP_ITERATIVE,
+        "sqpnp": cv2.SOLVEPNP_SQPNP,
+    }
+    return flags[name]
+
+
+def _pose_in_bounds(rvec: np.ndarray, tvec: np.ndarray, args: argparse.Namespace) -> bool:
+    position = _camera_center(rvec, tvec)
+    return bool(
+        abs(position[0]) <= args.max_abs_x_m
+        and abs(position[1]) <= args.max_abs_y_m
+        and args.min_z_m <= position[2] <= args.max_z_m
+    )
 
 
 def _reprojection_error(
@@ -298,6 +322,7 @@ def _summarize(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[
         "split": args.split,
         "checkpoint": str(args.checkpoint),
         "peak_threshold": args.peak_threshold,
+        "pnp_solver": args.pnp_solver,
         "keypoint_error_px": _stats([row["keypoint_error_mean_px"] for row in rows]),
         "visible_keypoints": _stats([row["visible_keypoints"] for row in rows]),
         "score_selected_keypoints": _stats([row["score_selected_keypoints"] for row in rows]),
@@ -308,6 +333,7 @@ def _summarize(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[
             ok_rows = [row for row in mode_rows if row["ok"]]
             summary[mode] = {
                 "success_rate": len(ok_rows) / max(len(mode_rows), 1),
+                "reject_reasons": _reject_reason_counts(mode_rows),
                 "used_points": _stats([row["used_points"] for row in mode_rows]),
                 "inliers": _stats([row["inliers"] for row in ok_rows]),
                 "reproj_error_px": _stats([row["reproj_error_px"] for row in ok_rows]),
@@ -315,6 +341,16 @@ def _summarize(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[
                 "rotation_error_deg": _stats([row["rotation_error_deg"] for row in ok_rows]),
             }
     return summary
+
+
+def _reject_reason_counts(rows: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if row["ok"]:
+            continue
+        reason = str(row.get("reject_reason") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
 
 
 def _stats(values: list[object]) -> dict[str, float | int | None]:
@@ -365,10 +401,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--heatmap-sigma", type=float, default=3.0)
     parser.add_argument("--peak-threshold", type=float, default=0.25)
     parser.add_argument("--pnp-mode", choices=["oracle-visible", "score-gated", "both"], default="both")
+    parser.add_argument("--pnp-solver", choices=["epnp", "ippe", "iterative", "sqpnp"], default="ippe")
     parser.add_argument("--min-points", type=int, default=4)
     parser.add_argument("--ransac-reproj-error", type=float, default=12.0)
     parser.add_argument("--ransac-iterations", type=int, default=100)
     parser.add_argument("--ransac-confidence", type=float, default=0.99)
+    parser.add_argument("--max-abs-x-m", type=float, default=20.0)
+    parser.add_argument("--max-abs-y-m", type=float, default=30.0)
+    parser.add_argument("--min-z-m", type=float, default=-0.2)
+    parser.add_argument("--max-z-m", type=float, default=3.0)
     parser.add_argument("--no-subpixel", dest="subpixel", action="store_false")
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)

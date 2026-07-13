@@ -84,6 +84,35 @@ def heatmaps_from_keypoints(
     return heatmaps
 
 
+def refine_keypoint_visibility_with_mask(
+    keypoints: list[dict[str, object]],
+    mask: np.ndarray,
+    radius_px: int = 5,
+    min_pixels: int = 2,
+    border_px: int = 2,
+) -> list[dict[str, object]]:
+    height, width = mask.shape[:2]
+    refined = []
+    mask_bool = mask > 0
+    for keypoint in keypoints:
+        visible = bool(keypoint.get("visible", False))
+        x, y = keypoint["xy"]
+        ix = int(round(float(x)))
+        iy = int(round(float(y)))
+        if visible:
+            inside = border_px <= ix < width - border_px and border_px <= iy < height - border_px
+            if inside:
+                x0 = max(0, ix - radius_px)
+                x1 = min(width, ix + radius_px + 1)
+                y0 = max(0, iy - radius_px)
+                y1 = min(height, iy + radius_px + 1)
+                visible = int(mask_bool[y0:y1, x0:x1].sum()) >= min_pixels
+            else:
+                visible = False
+        refined.append({**keypoint, "visible": visible})
+    return refined
+
+
 def _camera_points(points_3d: np.ndarray, rvec: np.ndarray, tvec: np.ndarray) -> np.ndarray:
     rotation, _ = cv2.Rodrigues(rvec)
     return (rotation @ points_3d.T + tvec).T

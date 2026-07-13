@@ -58,6 +58,8 @@ def train(args: argparse.Namespace, device: torch.device) -> None:
     start_epoch = 1
     if args.resume is not None:
         start_epoch, best_score = _load_checkpoint(args.resume, model, optimizer, scaler, device, args)
+        if not (args.out / "best.pt").exists():
+            best_score = _initial_best_score(args.best_metric)
 
     metrics_path = args.out / "metrics.jsonl"
     for epoch in range(start_epoch, start_epoch + args.epochs):

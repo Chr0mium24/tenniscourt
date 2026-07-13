@@ -24,6 +24,7 @@ outputs/.../labels/*.json
 - 二值 court line mask。
 - JSON 里的 keypoints，如果旧数据没有 keypoints，则根据相机参数动态投影生成；
 - 每个 keypoint 的可见性标记，用于避免不可见点的全黑 heatmap 主导 loss。
+- keypoint 可见性会再用渲染后的 line mask 修正：如果点附近没有线像素，或者点太靠近图像边界，则不参与 heatmap/visibility 监督。
 
 训练脚本 `src/tenniscourt/train.py` 使用：
 

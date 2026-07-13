@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from tenniscourt.keypoints import heatmaps_from_keypoints, project_keypoints_from_label
+from tenniscourt.keypoints import heatmaps_from_keypoints, project_keypoints_from_label, refine_keypoint_visibility_with_mask
 
 
 class LineMaskDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]):
@@ -43,6 +43,7 @@ class LineMaskDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor, to
 
         label = json.loads(label_path.read_text(encoding="utf-8"))
         keypoints = _keypoints_from_label(label, width, height)
+        keypoints = refine_keypoint_visibility_with_mask(keypoints, mask)
         heatmaps = heatmaps_from_keypoints(keypoints, width=width, height=height, sigma_px=self.heatmap_sigma)
         visible = np.asarray([bool(keypoint.get("visible", False)) for keypoint in keypoints], dtype=np.float32)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0

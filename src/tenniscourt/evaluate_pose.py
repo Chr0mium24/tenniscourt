@@ -17,7 +17,7 @@ except ImportError as exc:  # pragma: no cover
 
 from tenniscourt.camera import CameraIntrinsics, project_points
 from tenniscourt.data import LineMaskDataset, list_image_mask_pairs, split_pairs
-from tenniscourt.keypoints import court_keypoints, keypoint_names, project_keypoints_from_label
+from tenniscourt.keypoints import court_keypoints, keypoint_names, project_keypoints_from_label, refine_keypoint_visibility_with_mask
 from tenniscourt.model import TinyUNet
 
 
@@ -76,9 +76,10 @@ def _evaluate_batches(
         heatmaps = torch.sigmoid(outputs["keypoints"]).cpu().numpy()
         visibility_probs = torch.sigmoid(outputs["visibility"]).cpu().numpy() if "visibility" in outputs else None
         for item in range(images.shape[0]):
-            label_path = pairs[offset + item][2]
+            _image_path, mask_path, label_path = pairs[offset + item]
             row = _evaluate_sample(
                 label_path,
+                mask_path,
                 heatmaps[item],
                 None if visibility_probs is None else visibility_probs[item],
                 keypoints_3d,
@@ -93,6 +94,7 @@ def _evaluate_batches(
 
 def _evaluate_sample(
     label_path: Path,
+    mask_path: Path,
     heatmaps: np.ndarray,
     visibility_probs: np.ndarray | None,
     keypoints_3d: np.ndarray,
@@ -101,6 +103,12 @@ def _evaluate_sample(
     label = json.loads(label_path.read_text(encoding="utf-8"))
     decoded_xy, scores = decode_heatmap_peaks(heatmaps, subpixel=args.subpixel)
     gt_keypoints = label.get("keypoints") or project_keypoints_from_label(label)
+    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise FileNotFoundError(mask_path)
+    if args.width and args.height:
+        mask = cv2.resize(mask, (args.width, args.height), interpolation=cv2.INTER_NEAREST)
+    gt_keypoints = refine_keypoint_visibility_with_mask(gt_keypoints, mask)
     gt_xy = np.asarray([kp["xy"] for kp in gt_keypoints], dtype=np.float64)
     gt_visible = np.asarray([bool(kp.get("visible", False)) for kp in gt_keypoints], dtype=bool)
     all_errors = np.linalg.norm(decoded_xy - gt_xy, axis=1)

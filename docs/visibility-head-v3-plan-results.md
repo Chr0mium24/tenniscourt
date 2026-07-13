@@ -100,3 +100,22 @@ uv run --extra train tenniscourt-eval-pose \
 ```
 
 训练完成后使用 `selection-score=combined` 扫阈值，并与 v2 的 `peak` gating 结果对比。
+
+## Visibility label refinement
+
+v3 后续评估发现，部分 long-tail 错误来自标签可见性定义过宽：只要 keypoint 投影在画面内就算 visible，但实际渲染后可能被 occluder 覆盖、被清出 mask，或者太靠近图像边缘。
+
+已增加 mask-based visibility refinement：
+
+- 对每个 label keypoint，先保留原始投影可见性；
+- 再检查 keypoint 周围 `5px` 半径内是否至少有 `2` 个 line-mask 像素；
+- 如果没有 mask 支持，或者点距离边界小于 `2px`，则置为不可见；
+- 训练和 pose eval 使用同一套 refined visibility。
+
+本地 smoke 通过：
+
+```text
+epoch=3 train_loss=3.2934 mask_loss=1.5601 heatmap_loss=0.2159 visibility_loss=0.6539 val_iou=0.0267 val_kp_px=142.17 val_vis_acc=0.7679 device=cpu
+```
+
+下一步先在远端重跑 v2/v3 checkpoint 的 refined visibility 评估。如果仅因标签可见性过宽导致 mean 偏高，指标会直接下降；否则再训练 v4 refined-visible。

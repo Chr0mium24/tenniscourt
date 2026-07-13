@@ -10,7 +10,7 @@ class CourtLine:
     name: str
     start: tuple[float, float, float]
     end: tuple[float, float, float]
-    width_m: float = 0.05
+    width_m: float = 0.08
 
 
 COURT_LENGTH_M = 23.77

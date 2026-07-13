@@ -46,6 +46,7 @@ SDL_VIDEODRIVER=dummy uv run --extra viewer tenniscourt-viewer \
 - 可见线条数：`9`
 - 最终相机位置：`[0.0, -12.8, 0.4]`
 - court line 渲染：3D 地面 strip 投影
+- court line 默认宽度：`0.08 m`
 - 抗锯齿：`3x` supersampling 后 `INTER_AREA` 下采样
 - 球网渲染：通过
 - 边缘裁剪：使用 `cv2.clipLine`

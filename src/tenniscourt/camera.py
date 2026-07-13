@@ -36,6 +36,23 @@ def default_intrinsics(width: int, height: int, fov_deg: float, model: str) -> C
     return CameraIntrinsics(width=width, height=height, k=k, d=d, model=model)
 
 
+def scale_intrinsics(intrinsics: CameraIntrinsics, scale: int) -> CameraIntrinsics:
+    if scale <= 0:
+        raise ValueError("scale must be positive")
+    k = intrinsics.k.copy()
+    k[0, 0] *= scale
+    k[1, 1] *= scale
+    k[0, 2] *= scale
+    k[1, 2] *= scale
+    return CameraIntrinsics(
+        width=intrinsics.width * scale,
+        height=intrinsics.height * scale,
+        k=k,
+        d=intrinsics.d.copy(),
+        model=intrinsics.model,
+    )
+
+
 def look_at_rvec_tvec(
     position: np.ndarray,
     target: np.ndarray,

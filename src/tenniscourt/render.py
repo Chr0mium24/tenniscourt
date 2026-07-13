@@ -5,12 +5,13 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from tenniscourt.camera import CameraIntrinsics, look_at_rvec_tvec, points_in_front, project_points
+from tenniscourt.camera import CameraIntrinsics, look_at_rvec_tvec, points_in_front, project_points, scale_intrinsics
 from tenniscourt.court import DOUBLES_WIDTH_M, sample_line_points, sample_line_strip, tennis_court_lines
 
 
 NET_HEIGHT_CENTER_M = 0.914
 NET_HEIGHT_POST_M = 1.07
+DEFAULT_SUPERSAMPLE = 3
 
 
 @dataclass(frozen=True)
@@ -29,17 +30,20 @@ def render_sample(
     rng: np.random.Generator,
     intrinsics: CameraIntrinsics,
     bounds: RenderBounds | None = None,
+    supersample: int = DEFAULT_SUPERSAMPLE,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     bounds = bounds or RenderBounds()
-    image = _court_background(rng, intrinsics.width, intrinsics.height)
-    mask = np.zeros((intrinsics.height, intrinsics.width), dtype=np.uint8)
+    work_intrinsics = scale_intrinsics(intrinsics, supersample)
+    image = _court_background(rng, work_intrinsics.width, work_intrinsics.height)
+    mask = np.zeros((work_intrinsics.height, work_intrinsics.width), dtype=np.uint8)
 
     position, target, roll = _sample_camera_pose(rng, bounds)
     rvec, tvec, rotation = look_at_rvec_tvec(position, target, roll)
-    visible_lines = _draw_projected_lines(rng, image, mask, intrinsics, rvec, tvec, rotation)
-    net_segments = _draw_projected_net(image, mask, intrinsics, rvec, tvec, rotation)
+    visible_lines = _draw_projected_lines(rng, image, mask, work_intrinsics, rvec, tvec, rotation)
+    net_segments = _draw_projected_net(image, mask, work_intrinsics, rvec, tvec, rotation)
     _apply_shadows(rng, image)
     _apply_occluders(rng, image, mask)
+    image, mask = _downsample_render(image, mask, intrinsics.width, intrinsics.height)
     image = _apply_photo_noise(rng, image)
 
     label = {
@@ -52,6 +56,7 @@ def render_sample(
         "lines": visible_lines,
         "net_segments": net_segments,
     }
+    _scale_label_points(label, 1.0 / supersample)
     return image, mask, label
 
 
@@ -62,20 +67,23 @@ def render_camera_view(
     roll_deg: float = 0.0,
     background_bgr: tuple[int, int, int] = (54, 118, 75),
     line_bgr: tuple[int, int, int] = (245, 245, 245),
+    supersample: int = DEFAULT_SUPERSAMPLE,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    image = np.full((intrinsics.height, intrinsics.width, 3), background_bgr, dtype=np.uint8)
-    mask = np.zeros((intrinsics.height, intrinsics.width), dtype=np.uint8)
+    work_intrinsics = scale_intrinsics(intrinsics, supersample)
+    image = np.full((work_intrinsics.height, work_intrinsics.width, 3), background_bgr, dtype=np.uint8)
+    mask = np.zeros((work_intrinsics.height, work_intrinsics.width), dtype=np.uint8)
     rvec, tvec, rotation = look_at_rvec_tvec(position, target, roll_deg)
     visible_lines = _draw_projected_lines_styled(
         image=image,
         mask=mask,
-        intrinsics=intrinsics,
+        intrinsics=work_intrinsics,
         rvec=rvec,
         tvec=tvec,
         rotation=rotation,
         line_bgr=line_bgr,
     )
-    net_segments = _draw_projected_net(image, mask, intrinsics, rvec, tvec, rotation)
+    net_segments = _draw_projected_net(image, mask, work_intrinsics, rvec, tvec, rotation)
+    image, mask = _downsample_render(image, mask, intrinsics.width, intrinsics.height)
     label = {
         "camera": intrinsics.as_json(),
         "position_world_m": np.asarray(position).round(6).tolist(),
@@ -86,6 +94,7 @@ def render_camera_view(
         "lines": visible_lines,
         "net_segments": net_segments,
     }
+    _scale_label_points(label, 1.0 / supersample)
     return image, mask, label
 
 
@@ -158,8 +167,9 @@ def _draw_projected_line_strip(
     rotation: np.ndarray,
     line_bgr: tuple[int, int, int],
 ) -> list[list[float]]:
-    center = sample_line_points(line, samples=128)
-    edge_a, edge_b = sample_line_strip(line, samples=128)
+    samples = 2 if _projects_as_straight_strip(intrinsics) else 128
+    center = sample_line_points(line, samples=samples)
+    edge_a, edge_b = sample_line_strip(line, samples=samples)
     valid = _valid_projected_points(center, rotation, tvec)
     center_2d = project_points(center, intrinsics, rvec, tvec)
     edge_a_2d = project_points(edge_a, intrinsics, rvec, tvec)
@@ -173,12 +183,22 @@ def _draw_projected_line_strip(
     for run in _valid_runs(valid):
         if len(run) < 2:
             continue
-        polygon = np.vstack([edge_a_2d[run], edge_b_2d[run][::-1]])
+        if _projects_as_straight_strip(intrinsics):
+            polygon = np.array(
+                [edge_a_2d[run[0]], edge_a_2d[run[-1]], edge_b_2d[run[-1]], edge_b_2d[run[0]]],
+                dtype=np.float64,
+            )
+        else:
+            polygon = np.vstack([edge_a_2d[run], edge_b_2d[run][::-1]])
         polygon_i32 = _clamped_polygon(polygon, intrinsics.width, intrinsics.height)
         cv2.fillPoly(image, [polygon_i32], line_bgr, lineType=cv2.LINE_AA)
         cv2.fillPoly(mask, [polygon_i32], 255, lineType=cv2.LINE_AA)
 
     return _collect_clipped_polyline(center_2d, valid, intrinsics.width, intrinsics.height)
+
+
+def _projects_as_straight_strip(intrinsics: CameraIntrinsics) -> bool:
+    return intrinsics.model == "pinhole" and np.allclose(intrinsics.d, 0.0)
 
 
 def _draw_projected_net(
@@ -322,6 +342,32 @@ def _append_visible_point(polyline: list[list[float]], point: tuple[int, int]) -
     current = [float(point[0]), float(point[1])]
     if not polyline or polyline[-1] != current:
         polyline.append(current)
+
+
+def _downsample_render(
+    image: np.ndarray,
+    mask: np.ndarray,
+    width: int,
+    height: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if image.shape[1] == width and image.shape[0] == height:
+        return image, mask
+    image_small = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+    mask_small = cv2.resize(mask, (width, height), interpolation=cv2.INTER_AREA)
+    return image_small, mask_small
+
+
+def _scale_label_points(label: dict[str, object], scale: float) -> None:
+    for line in label.get("lines", []):
+        _scale_polyline(line.get("polyline", []), scale)
+    for segment in label.get("net_segments", []):
+        _scale_polyline(segment, scale)
+
+
+def _scale_polyline(polyline: list[list[float]], scale: float) -> None:
+    for point in polyline:
+        point[0] = round(float(point[0]) * scale, 3)
+        point[1] = round(float(point[1]) * scale, 3)
 
 
 def _court_background(rng: np.random.Generator, width: int, height: int) -> np.ndarray:

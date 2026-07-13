@@ -66,7 +66,7 @@ def _run_window(args: argparse.Namespace, state: ViewerState) -> None:
                 _apply_mouse_delta(state, event.rel[0], event.rel[1])
 
         _apply_keyboard(state, dt)
-        image, _, label = _render_state(intrinsics, state)
+        image, _, label = _render_state(intrinsics, state, args.supersample)
         screen.blit(_image_surface(image), (0, 0))
         _draw_status(screen, state, len(label["lines"]))
         pygame.display.flip()
@@ -85,7 +85,7 @@ def _run_headless(args: argparse.Namespace, state: ViewerState) -> None:
     label = None
     frames = args.max_frames or 1
     for _ in range(frames):
-        image, _, label = _render_state(intrinsics, state)
+        image, _, label = _render_state(intrinsics, state, args.supersample)
         state.position += _forward_vector(state.yaw_deg) * (state.speed_mps / max(args.fps, 1))
 
     if args.save_frame is not None and image is not None:
@@ -99,10 +99,11 @@ def _run_headless(args: argparse.Namespace, state: ViewerState) -> None:
 def _render_state(
     intrinsics: object,
     state: ViewerState,
+    supersample: int,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     direction = _look_direction(state.yaw_deg, state.pitch_deg)
     target = state.position + direction
-    return render_camera_view(intrinsics, state.position, target)
+    return render_camera_view(intrinsics, state.position, target, supersample=supersample)
 
 
 def _apply_keyboard(state: ViewerState, dt: float) -> None:
@@ -172,6 +173,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--fov-deg", type=float, default=105.0)
+    parser.add_argument("--supersample", type=int, default=3)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--speed", type=float, default=3.0)
     parser.add_argument("--mouse-sensitivity", type=float, default=0.08)

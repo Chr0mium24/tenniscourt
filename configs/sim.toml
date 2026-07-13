@@ -2,6 +2,7 @@
 width = 640
 height = 360
 count = 1000
+supersample = 3
 
 [camera]
 model = "pinhole"

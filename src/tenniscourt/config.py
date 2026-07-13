@@ -11,6 +11,7 @@ class GenerateSettings:
     count: int = 1000
     width: int = 640
     height: int = 360
+    supersample: int = 3
     seed: int = 7
     fov_deg: float = 105.0
     camera_model: str = "pinhole"
@@ -33,6 +34,7 @@ def load_generate_settings(config_path: Path | None) -> GenerateSettings:
         count=int(image.get("count", 1000)),
         width=int(image.get("width", 640)),
         height=int(image.get("height", 360)),
+        supersample=int(image.get("supersample", 3)),
         seed=int(output.get("seed", 7)),
         fov_deg=float(camera.get("fov_deg", 105.0)),
         camera_model=str(camera.get("model", "pinhole")),

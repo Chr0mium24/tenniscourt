@@ -49,6 +49,8 @@ pitch = -2 deg
 
 也可以通过 `--start-x`、`--start-y`、`--start-z`、`--yaw-deg`、`--pitch-deg` 覆盖。
 
+默认 `--supersample 3`，用于减少低分辨率线条锯齿；交互预览卡顿时可降到 `--supersample 1` 或 `2`。
+
 ## 运行
 
 ```bash

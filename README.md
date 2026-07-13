@@ -43,7 +43,7 @@ Each sample contains:
 - `masks/*.png`: binary court-line mask
 - `labels/*.json`: camera pose, K/D, visible line polylines, and metadata
 
-Court lines are rendered as 5 cm metric strips on the ground plane, then projected through the OpenCV camera model. The net is also projected by OpenCV and drawn as an image occluder; it is not labeled as a court line.
+Court lines are rendered as 5 cm metric strips on the ground plane, then projected through the OpenCV camera model. Pinhole/no-distortion strips are rendered as projected quadrilaterals, so their edges stay straight. RGB output uses supersampling to reduce jagged edges. The net is also projected by OpenCV and drawn as an image occluder; it is not labeled as a court line.
 
 ## Train
 
@@ -63,6 +63,7 @@ uv run --extra viewer tenniscourt-viewer
 ```
 
 Default start pose is a low robot-like camera at `(0, -13, 0.4)m`, looking toward the court with `pitch=-2°`.
+Use `--supersample 1` for faster preview or `--supersample 3` for smoother edges.
 
 Controls:
 

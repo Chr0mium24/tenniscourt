@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from tenniscourt.camera import default_intrinsics
+from tenniscourt.keypoints import keypoint_names
 from tenniscourt.render import render_camera_view
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
@@ -52,9 +53,12 @@ def _run_window(args: argparse.Namespace, state: ViewerState) -> None:
     pygame.mouse.set_visible(False)
     pygame.event.set_grab(not args.no_grab)
     intrinsics = default_intrinsics(args.width, args.height, args.fov_deg, "pinhole")
+    predictor = _make_predictor(args)
+    prediction = None
 
     running = True
     frames = 0
+    predict_every = max(args.predict_every, 1)
     while running:
         dt = clock.tick(args.fps) / 1000.0
         for event in pygame.event.get():
@@ -67,8 +71,14 @@ def _run_window(args: argparse.Namespace, state: ViewerState) -> None:
 
         _apply_keyboard(state, dt)
         image, _, label = _render_state(intrinsics, state, args.supersample)
+        if predictor is not None and frames % predict_every == 0:
+            if args.reload_checkpoint:
+                predictor.reload_if_changed()
+            prediction = predictor.predict(image)
+        if prediction is not None:
+            _draw_prediction_overlay(image, prediction, args)
         screen.blit(_image_surface(image), (0, 0))
-        _draw_status(screen, state, len(label["lines"]))
+        _draw_status(screen, state, len(label["lines"]), prediction, predictor)
         pygame.display.flip()
         frames += 1
         if args.max_frames is not None and frames >= args.max_frames:
@@ -81,11 +91,18 @@ def _run_window(args: argparse.Namespace, state: ViewerState) -> None:
 
 def _run_headless(args: argparse.Namespace, state: ViewerState) -> None:
     intrinsics = default_intrinsics(args.width, args.height, args.fov_deg, "pinhole")
+    predictor = _make_predictor(args)
     image = None
     label = None
+    prediction = None
     frames = args.max_frames or 1
     for _ in range(frames):
         image, _, label = _render_state(intrinsics, state, args.supersample)
+        if predictor is not None:
+            if args.reload_checkpoint:
+                predictor.reload_if_changed()
+            prediction = predictor.predict(image)
+            _draw_prediction_overlay(image, prediction, args)
         state.position += _forward_vector(state.yaw_deg) * (state.speed_mps / max(args.fps, 1))
 
     if args.save_frame is not None and image is not None:
@@ -93,7 +110,10 @@ def _run_headless(args: argparse.Namespace, state: ViewerState) -> None:
         cv2.imwrite(str(args.save_frame), image)
 
     visible = len(label["lines"]) if label else 0
-    print(f"frames={frames} visible_lines={visible} position={state.position.round(3).tolist()}")
+    status = f"frames={frames} visible_lines={visible} position={state.position.round(3).tolist()}"
+    if prediction is not None:
+        status += f" selected_keypoints={int(prediction.selected.sum())} infer_ms={prediction.inference_ms:.1f}"
+    print(status)
 
 
 def _render_state(
@@ -158,14 +178,65 @@ def _image_surface(image_bgr: np.ndarray) -> pygame.Surface:
     return pygame.image.frombuffer(rgb.tobytes(), (rgb.shape[1], rgb.shape[0]), "RGB")
 
 
-def _draw_status(screen: pygame.Surface, state: ViewerState, visible_lines: int) -> None:
+def _make_predictor(args: argparse.Namespace) -> object | None:
+    if args.checkpoint is None:
+        return None
+    from tenniscourt.prediction import CourtKeypointPredictor
+
+    return CourtKeypointPredictor(
+        args.checkpoint,
+        device_name=args.device,
+        require_cuda=args.require_cuda,
+        base_channels=args.base_channels,
+        selection_score=args.selection_score,
+        score_threshold=args.score_threshold,
+        subpixel=args.subpixel,
+    )
+
+
+def _draw_prediction_overlay(image: np.ndarray, prediction: object, args: argparse.Namespace) -> None:
+    names = keypoint_names()
+    for index, (xy, score, selected) in enumerate(
+        zip(prediction.xy, prediction.selection_scores, prediction.selected, strict=True)
+    ):
+        if not args.show_all_keypoints and not selected:
+            continue
+        x, y = int(round(float(xy[0]))), int(round(float(xy[1])))
+        if x < 0 or y < 0 or x >= image.shape[1] or y >= image.shape[0]:
+            continue
+        color = (50, 255, 80) if selected else (110, 110, 110)
+        radius = 5 if selected else 3
+        cv2.circle(image, (x, y), radius + 2, (0, 0, 0), -1, lineType=cv2.LINE_AA)
+        cv2.circle(image, (x, y), radius, color, -1, lineType=cv2.LINE_AA)
+        if args.overlay_labels:
+            text = f"{index}:{score:.2f}" if args.short_labels else f"{names[index]} {score:.2f}"
+            cv2.putText(image, text, (x + 7, y - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(image, text, (x + 7, y - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
+
+
+def _draw_status(
+    screen: pygame.Surface,
+    state: ViewerState,
+    visible_lines: int,
+    prediction: object | None = None,
+    predictor: object | None = None,
+) -> None:
     font = pygame.font.SysFont("monospace", 16)
-    text = (
+    lines = [
         f"pos=({state.position[0]:.2f},{state.position[1]:.2f},{state.position[2]:.2f}) "
         f"yaw={state.yaw_deg:.1f} pitch={state.pitch_deg:.1f} lines={visible_lines}"
-    )
-    surface = font.render(text, True, (245, 245, 245))
-    screen.blit(surface, (12, 10))
+    ]
+    if prediction is not None:
+        lines.append(
+            f"model={prediction.device} keypoints={int(prediction.selected.sum())}/14 "
+            f"infer={prediction.inference_ms:.1f}ms"
+        )
+    if predictor is not None and getattr(predictor, "warning", None):
+        lines.append(str(predictor.warning)[:120])
+
+    for row, text in enumerate(lines):
+        surface = font.render(text, True, (245, 245, 245))
+        screen.blit(surface, (12, 10 + row * 20))
 
 
 def _parse_args() -> argparse.Namespace:
@@ -186,6 +257,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--save-frame", type=Path, default=None)
+    parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--require-cuda", action="store_true")
+    parser.add_argument("--base-channels", type=int, default=16)
+    parser.add_argument("--predict-every", type=int, default=1)
+    parser.add_argument("--score-threshold", type=float, default=0.5)
+    parser.add_argument("--selection-score", choices=["peak", "visibility", "combined"], default="combined")
+    parser.add_argument("--show-all-keypoints", action="store_true")
+    parser.add_argument("--short-labels", action="store_true")
+    parser.add_argument("--no-overlay-labels", dest="overlay_labels", action="store_false")
+    parser.add_argument("--reload-checkpoint", action="store_true")
+    parser.add_argument("--no-subpixel", dest="subpixel", action="store_false")
+    parser.set_defaults(overlay_labels=True, subpixel=True)
     return parser.parse_args()
 
 

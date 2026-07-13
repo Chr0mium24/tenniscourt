@@ -65,6 +65,21 @@ uv run --extra viewer tenniscourt-viewer
 Default start pose is a low robot-like camera at `(0, -13, 0.4)m`, looking toward the court with `pitch=-2°`.
 Use `--supersample 1` for faster preview or `--supersample 3` for smoother edges.
 
+To overlay live model keypoint predictions in the same viewer:
+
+```bash
+uv run --extra viewer --extra train tenniscourt-viewer \
+  --width 640 \
+  --height 360 \
+  --supersample 1 \
+  --checkpoint runs/heatmap-10000-v5-hard-keypoints/best.pt \
+  --selection-score combined \
+  --score-threshold 0.5 \
+  --short-labels
+```
+
+Use `--reload-checkpoint` to hot-reload the checkpoint when `best.pt` is updated, and `--predict-every 2` or higher if the model inference is slower than the GUI frame rate.
+
 Controls:
 
 - `W/A/S/D`: move on the court plane

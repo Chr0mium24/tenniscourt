@@ -58,10 +58,16 @@ def sample_line_points(line: CourtLine, samples: int = 64) -> np.ndarray:
 
 
 def sample_line_strip(line: CourtLine, samples: int = 64) -> tuple[np.ndarray, np.ndarray]:
-    center = sample_line_points(line, samples=samples)
     start = np.asarray(line.start, dtype=np.float32)
     end = np.asarray(line.end, dtype=np.float32)
     direction = end - start
+    direction_norm = float(np.linalg.norm(direction))
+    if direction_norm < 1e-6:
+        raise ValueError(f"invalid zero-length court line: {line.name}")
+    direction_unit = direction / direction_norm
+    cap = direction_unit * (line.width_m / 2.0)
+    capped_line = CourtLine(line.name, tuple(start - cap), tuple(end + cap), line.width_m)
+    center = sample_line_points(capped_line, samples=samples)
     lateral = np.array([-direction[1], direction[0], 0.0], dtype=np.float32)
     norm = float(np.linalg.norm(lateral))
     if norm < 1e-6:

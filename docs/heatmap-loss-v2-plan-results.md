@@ -104,3 +104,60 @@ epoch=2 train_loss=2.6592 mask_loss=1.5627 heatmap_loss=0.2193 val_iou=0.0267 va
 - keypoint overlay 可视化可生成。
 
 下一步在远端使用已有 `outputs/synth-10000` 和旧 `runs/heatmap-10000/last.pt` 继续训练，输出到新目录 `runs/heatmap-10000-v2`，避免覆盖旧实验。
+
+## 远端 10000 张续训结果
+
+远端机器：`anilam@10.31.151.120`  
+远端路径：`/home/anilam/Codes/tenniscourt`  
+代码提交：`cb569fa`  
+输入数据：`outputs/synth-10000`  
+初始化 checkpoint：`runs/heatmap-10000/last.pt`  
+输出目录：`runs/heatmap-10000-v2`  
+
+续训命令：
+
+```bash
+.venv/bin/tenniscourt-train \
+  --data outputs/synth-10000 \
+  --out runs/heatmap-10000-v2 \
+  --epochs 30 \
+  --batch-size 16 \
+  --workers 4 \
+  --require-cuda \
+  --resume runs/heatmap-10000/last.pt \
+  --heatmap-loss weighted-mse \
+  --heatmap-loss-weight 10 \
+  --heatmap-pos-weight 100 \
+  --viz-count 8
+```
+
+退出状态：`TRAIN_V2_EXIT:0`
+
+输出文件：
+
+- `runs/heatmap-10000-v2/best.pt`
+- `runs/heatmap-10000-v2/last.pt`
+- `runs/heatmap-10000-v2/metrics.jsonl`
+- `runs/heatmap-10000-v2/viz/epoch_0040/sample_000.png`
+
+关键指标：
+
+| epoch | train_loss | mask_loss | heatmap_loss | val_iou | val_keypoint_peak_error_px |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 baseline | 0.0350 | - | - | 0.9518 | 112.64 |
+| 11 | 0.0737 | 0.0348 | 0.0039 | 0.9523 | 78.90 |
+| 20 | 0.0358 | 0.0255 | 0.0010 | 0.9573 | 31.79 |
+| 27 | 0.0314 | 0.0234 | 0.0008 | 0.9591 | 19.10 |
+| 35 | 0.0286 | 0.0218 | 0.0007 | 0.9606 | 14.97 |
+| 40 | 0.0273 | 0.0210 | 0.0006 | 0.9638 | 13.27 |
+
+最佳 checkpoint 为 epoch 40：
+
+```text
+val_iou=0.9638
+val_keypoint_peak_error_px=13.27
+```
+
+相对 baseline，keypoint peak error 从 `112.64px` 降到 `13.27px`，约降低 `88.2%`。mask IoU 也从 `0.9518` 提升到 `0.9638`。
+
+已抽查 `epoch_0040/sample_000.png` overlay，可见红色 GT 点和绿色预测点基本贴合。后续还需要把 heatmap peak 转成 2D-3D 对应点，再做 PnP/RANSAC 位姿估计验证。

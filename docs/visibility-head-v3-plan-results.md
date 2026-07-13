@@ -119,3 +119,34 @@ epoch=3 train_loss=3.2934 mask_loss=1.5601 heatmap_loss=0.2159 visibility_loss=0
 ```
 
 下一步先在远端重跑 v2/v3 checkpoint 的 refined visibility 评估。如果仅因标签可见性过宽导致 mean 偏高，指标会直接下降；否则再训练 v4 refined-visible。
+
+## Hard-keypoint loss weights
+
+v4 refined-visible 训练后，剩余误差仍主要来自少数 keypoint 的长尾。训练脚本增加了：
+
+```bash
+--keypoint-channel-weights
+```
+
+格式为 14 个逗号分隔权重，顺序与 `keypoint_names()` 一致。默认全为 `1`，不影响已有命令。
+
+本地 smoke 使用：
+
+```bash
+--keypoint-channel-weights 1,1,1,1,1,1,2,1,2,4,1,1,4,1
+```
+
+对应增强：
+
+- `far_left_singles_corner`: 2
+- `left_near_service_corner`: 2
+- `right_near_service_corner`: 4
+- `center_near_service_t`: 4
+
+本地 smoke 通过：
+
+```text
+epoch=4 train_loss=3.2341 mask_loss=1.5418 heatmap_loss=0.2080 visibility_loss=0.6524 val_iou=0.0267 val_kp_px=139.43 val_vis_acc=0.7679 device=cpu
+```
+
+远端 v5 将从 v4 best checkpoint 继续训练，使用 hard-keypoint weights，目标是进一步压低 `>50px` 长尾比例。

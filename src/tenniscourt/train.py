@@ -189,6 +189,7 @@ def _heatmap_loss(
 ) -> torch.Tensor:
     visibility = visible[:, :, None, None].to(dtype=targets.dtype)
     weights = (1.0 + (args.heatmap_pos_weight - 1.0) * targets) * visibility
+    weights = weights * _keypoint_channel_weights(args.keypoint_channel_weights, targets.shape[1], targets.device, targets.dtype)
     denom = weights.sum().clamp_min(1.0)
     if args.heatmap_loss == "weighted-mse":
         loss = (torch.sigmoid(logits) - targets).square()
@@ -197,6 +198,16 @@ def _heatmap_loss(
     else:  # pragma: no cover
         raise ValueError(f"unsupported heatmap loss: {args.heatmap_loss}")
     return (loss * weights).sum() / denom
+
+
+def _keypoint_channel_weights(spec: str, channels: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    if not spec:
+        values = [1.0] * channels
+    else:
+        values = [float(value) for value in spec.split(",")]
+        if len(values) != channels:
+            raise ValueError(f"expected {channels} keypoint channel weights, got {len(values)}")
+    return torch.tensor(values, device=device, dtype=dtype).view(1, channels, 1, 1)
 
 
 def _load_checkpoint(
@@ -333,6 +344,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--heatmap-loss", choices=["weighted-mse", "weighted-bce"], default="weighted-mse")
     parser.add_argument("--heatmap-loss-weight", type=float, default=5.0)
     parser.add_argument("--heatmap-pos-weight", type=float, default=50.0)
+    parser.add_argument("--keypoint-channel-weights", default="")
     parser.add_argument("--visibility-loss-weight", type=float, default=1.0)
     parser.add_argument("--visibility-threshold", type=float, default=0.5)
     parser.add_argument("--best-metric", choices=["val_iou", "val_keypoint_peak_error_px"], default="val_keypoint_peak_error_px")

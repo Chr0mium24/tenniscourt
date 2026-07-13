@@ -49,6 +49,40 @@ def render_sample(
     return image, mask, label
 
 
+def render_camera_view(
+    intrinsics: CameraIntrinsics,
+    position: np.ndarray,
+    target: np.ndarray,
+    roll_deg: float = 0.0,
+    background_bgr: tuple[int, int, int] = (54, 118, 75),
+    line_bgr: tuple[int, int, int] = (245, 245, 245),
+    line_thickness: int = 4,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    image = np.full((intrinsics.height, intrinsics.width, 3), background_bgr, dtype=np.uint8)
+    mask = np.zeros((intrinsics.height, intrinsics.width), dtype=np.uint8)
+    rvec, tvec, rotation = look_at_rvec_tvec(position, target, roll_deg)
+    visible_lines = _draw_projected_lines_styled(
+        image=image,
+        mask=mask,
+        intrinsics=intrinsics,
+        rvec=rvec,
+        tvec=tvec,
+        rotation=rotation,
+        line_bgr=line_bgr,
+        thickness=line_thickness,
+    )
+    label = {
+        "camera": intrinsics.as_json(),
+        "position_world_m": np.asarray(position).round(6).tolist(),
+        "target_world_m": np.asarray(target).round(6).tolist(),
+        "roll_deg": float(roll_deg),
+        "rvec": rvec.reshape(-1).round(8).tolist(),
+        "tvec": tvec.reshape(-1).round(8).tolist(),
+        "lines": visible_lines,
+    }
+    return image, mask, label
+
+
 def _sample_camera_pose(
     rng: np.random.Generator,
     bounds: RenderBounds,
@@ -94,6 +128,29 @@ def _draw_projected_lines(
         if len(polyline) >= 2:
             visible_lines.append({"name": line.name, "polyline": polyline})
 
+    return visible_lines
+
+
+def _draw_projected_lines_styled(
+    image: np.ndarray,
+    mask: np.ndarray,
+    intrinsics: CameraIntrinsics,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    rotation: np.ndarray,
+    line_bgr: tuple[int, int, int],
+    thickness: int,
+) -> list[dict[str, object]]:
+    visible_lines: list[dict[str, object]] = []
+    for line in tennis_court_lines():
+        points_3d = sample_line_points(line, samples=128)
+        in_front = points_in_front(points_3d, rotation, tvec)
+        points_2d = project_points(points_3d, intrinsics, rvec, tvec)
+        inside = _inside_image(points_2d, intrinsics.width, intrinsics.height, margin=16)
+        valid = in_front & inside
+        polyline = _draw_valid_polyline(image, mask, points_2d, valid, line_bgr, thickness)
+        if len(polyline) >= 2:
+            visible_lines.append({"name": line.name, "polyline": polyline})
     return visible_lines
 
 

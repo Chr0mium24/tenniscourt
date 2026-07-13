@@ -14,10 +14,14 @@ train = [
     "torch>=2.7",
     "tqdm>=4.66",
 ]
+viewer = [
+    "pygame>=2.6",
+]
 
 [project.scripts]
 tenniscourt-generate = "tenniscourt.generate:main"
 tenniscourt-train = "tenniscourt.train:main"
+tenniscourt-viewer = "tenniscourt.viewer:main"
 
 [build-system]
 requires = ["uv_build>=0.8.0,<0.9.0"]

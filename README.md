@@ -51,9 +51,29 @@ uv run tenniscourt-train --data outputs/synth --epochs 10 --batch-size 16 --devi
 
 `--device auto` uses CUDA when PyTorch can see a GPU. Use `--require-cuda` when a CPU fallback should be treated as an error.
 
+## Interactive Viewer
+
+The viewer uses the same Python/OpenCV image renderer as dataset generation. It does not use Three.js, WebGL, Blender, or another 3D engine.
+
+```bash
+uv sync --extra viewer
+uv run --extra viewer tenniscourt-viewer
+```
+
+Default start pose is a low robot-like camera at `(0, -13, 0.4)m`, looking toward the court with `pitch=-2°`.
+
+Controls:
+
+- `W/A/S/D`: move on the court plane
+- `Space`: move up
+- `Shift`: move down
+- mouse: look around
+- `Esc`: quit
+
 ## Smoke Test
 
 ```bash
 uv run tenniscourt-generate --count 16 --width 320 --height 180 --out outputs/smoke
 uv run --extra train tenniscourt-train --data outputs/smoke --epochs 1 --batch-size 4 --max-steps 2
+uv run --extra viewer tenniscourt-viewer --headless --max-frames 2 --save-frame outputs/viewer-smoke.png
 ```

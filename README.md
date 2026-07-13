@@ -41,7 +41,7 @@ Each sample contains:
 
 - `images/*.png`: synthetic RGB image
 - `masks/*.png`: binary court-line mask
-- `labels/*.json`: camera pose, K/D, visible line polylines, and metadata
+- `labels/*.json`: camera pose, K/D, visible line polylines, keypoints, and metadata
 
 Court lines are rendered as 8 cm metric strips on the ground plane, then projected through the OpenCV camera model. Pinhole/no-distortion strips are rendered as projected quadrilaterals, so their edges stay straight. RGB output uses supersampling to reduce jagged edges. The net is also projected by OpenCV and drawn as an image occluder; it is not labeled as a court line.
 
@@ -51,7 +51,7 @@ Court lines are rendered as 8 cm metric strips on the ground plane, then project
 uv run tenniscourt-train --data outputs/synth --epochs 10 --batch-size 16 --device auto
 ```
 
-`--device auto` uses CUDA when PyTorch can see a GPU. Use `--require-cuda` when a CPU fallback should be treated as an error.
+Training is multi-task: the model predicts a court-line mask and 14 keypoint heatmaps. `--device auto` uses CUDA when PyTorch can see a GPU. Use `--require-cuda` when a CPU fallback should be treated as an error.
 
 ## Interactive Viewer
 

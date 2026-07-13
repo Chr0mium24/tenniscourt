@@ -9,6 +9,7 @@ import numpy as np
 
 from tenniscourt.camera import default_intrinsics
 from tenniscourt.config import GenerateSettings, load_generate_settings, override_settings
+from tenniscourt.keypoints import keypoint_names, project_keypoints_from_label
 from tenniscourt.render import RenderBounds, render_sample
 
 
@@ -33,11 +34,13 @@ def generate_dataset(settings: GenerateSettings) -> None:
         "camera_model": settings.camera_model,
         "fov_deg": settings.fov_deg,
         "supersample": settings.supersample,
+        "keypoint_names": keypoint_names(),
     }
     (settings.out / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     for index in range(settings.count):
         image, mask, label = render_sample(rng, intrinsics, bounds, supersample=settings.supersample)
+        label["keypoints"] = project_keypoints_from_label(label)
         stem = f"{index:06d}"
         cv2.imwrite(str(images_dir / f"{stem}.png"), image)
         cv2.imwrite(str(masks_dir / f"{stem}.png"), mask)

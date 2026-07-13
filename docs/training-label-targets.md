@@ -4,25 +4,33 @@
 
 ## 当前训练目标
 
-当前 `tenniscourt-train` 训练的是二值分割模型，不是点检测模型。
+当前 `tenniscourt-train` 训练的是多任务模型：
+
+- court line 二值 mask；
+- 14 个 court keypoint heatmap。
 
 训练数据读取路径：
 
 ```text
 outputs/.../images/*.png
 outputs/.../masks/*.png
+outputs/.../labels/*.json
 ```
 
-`src/tenniscourt/data.py` 中的 `LineMaskDataset` 只读取：
+`src/tenniscourt/data.py` 中的 `LineMaskDataset` 读取：
 
 - RGB 图像；
 - 二值 court line mask。
+- JSON 里的 keypoints，如果旧数据没有 keypoints，则根据相机参数动态投影生成。
 
-训练脚本 `src/tenniscourt/train.py` 使用 `BCEWithLogitsLoss + dice_loss`，目标是预测每个像素是否属于球场线。
+训练脚本 `src/tenniscourt/train.py` 使用：
+
+- mask：`BCEWithLogitsLoss + dice_loss`；
+- keypoint heatmap：`BCEWithLogitsLoss`。
 
 ## JSON 标签的作用
 
-`labels/*.json` 目前不参与训练。
+`labels/*.json` 现在参与 heatmap 监督。
 
 它里面的内容包括：
 
@@ -32,20 +40,19 @@ outputs/.../masks/*.png
 - net segments；
 - 位置和姿态信息。
 
-这些 JSON 标签现在主要用于：
+这些 JSON 标签现在用于：
 
 - 调试合成数据；
+- 生成 14 通道 keypoint heatmap；
 - 验证投影是否稳定；
 - 后续从 mask/line 恢复相机位姿；
-- 将来如果要改成关键点或 polyline 训练，可以作为标签来源。
 
-## 如果要训练点
+## 为什么保留 mask
 
-如果目标改成“检测图像中出现的球场关键点/交点”，需要新增一条训练路径：
+只训练 keypoint heatmap 在低机位下仍有风险：
 
-- 从 JSON 或几何关系生成 keypoint heatmap；
-- 数据集读取 heatmap；
-- 模型输出 heatmap 而不是 mask；
-- 损失函数改成 heatmap MSE、focal loss 或类似形式。
+- 很多关键点不可见；
+- 局部视野里可能只有线，没有交点；
+- mask 可以提供密集监督。
 
-当前代码还没有做这条路径。
+因此当前保留 mask 分支，同时增加 heatmap 分支，后处理优先使用 heatmap 点，mask 作为辅助置信和线区域约束。

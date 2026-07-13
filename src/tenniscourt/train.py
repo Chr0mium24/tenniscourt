@@ -13,7 +13,8 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit("Install training dependencies first: uv sync --extra train") from exc
 
 from tenniscourt.data import LineMaskDataset, list_image_mask_pairs, split_pairs
-from tenniscourt.model import TinyUNet, dice_loss, mask_iou
+from tenniscourt.keypoints import keypoint_names
+from tenniscourt.model import TinyUNet, dice_loss, heatmap_peak_error, mask_iou
 
 
 def main() -> None:
@@ -30,21 +31,21 @@ def train(args: argparse.Namespace, device: torch.device) -> None:
     image_size = (args.width, args.height) if args.width and args.height else None
 
     train_loader = DataLoader(
-        LineMaskDataset(train_pairs, image_size=image_size),
+        LineMaskDataset(train_pairs, image_size=image_size, heatmap_sigma=args.heatmap_sigma),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.workers,
         pin_memory=device.type == "cuda",
     )
     val_loader = DataLoader(
-        LineMaskDataset(val_pairs, image_size=image_size),
+        LineMaskDataset(val_pairs, image_size=image_size, heatmap_sigma=args.heatmap_sigma),
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.workers,
         pin_memory=device.type == "cuda",
     ) if val_pairs else None
 
-    model = TinyUNet(base_channels=args.base_channels).to(device)
+    model = TinyUNet(base_channels=args.base_channels, keypoint_channels=len(keypoint_names())).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     bce = nn.BCEWithLogitsLoss()
     use_amp = device.type == "cuda" and not args.no_amp
@@ -53,9 +54,15 @@ def train(args: argparse.Namespace, device: torch.device) -> None:
 
     metrics_path = args.out / "metrics.jsonl"
     for epoch in range(1, args.epochs + 1):
-        train_loss = _train_epoch(model, train_loader, optimizer, bce, scaler, device, use_amp, args.max_steps)
-        val_iou = _validate(model, val_loader, device) if val_loader else 0.0
-        row = {"epoch": epoch, "train_loss": train_loss, "val_iou": val_iou, "device": str(device)}
+        train_loss = _train_epoch(model, train_loader, optimizer, bce, scaler, device, use_amp, args)
+        val_iou, val_kp_error = _validate(model, val_loader, device) if val_loader else (0.0, 0.0)
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_iou": val_iou,
+            "val_keypoint_peak_error_px": val_kp_error,
+            "device": str(device),
+        }
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row) + "\n")
 
@@ -64,7 +71,10 @@ def train(args: argparse.Namespace, device: torch.device) -> None:
         if val_iou >= best_iou:
             best_iou = val_iou
             torch.save(checkpoint, args.out / "best.pt")
-        print(f"epoch={epoch} train_loss={train_loss:.4f} val_iou={val_iou:.4f} device={device}")
+        print(
+            f"epoch={epoch} train_loss={train_loss:.4f} "
+            f"val_iou={val_iou:.4f} val_kp_px={val_kp_error:.2f} device={device}"
+        )
 
 
 def _train_epoch(
@@ -75,44 +85,52 @@ def _train_epoch(
     scaler: torch.amp.GradScaler,
     device: torch.device,
     use_amp: bool,
-    max_steps: int | None,
+    args: argparse.Namespace,
 ) -> float:
     model.train()
     total_loss = 0.0
     steps = 0
     iterator = tqdm(loader, desc="train", leave=False)
-    for images, masks in iterator:
+    for images, masks, heatmaps in iterator:
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
+        heatmaps = heatmaps.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-            logits = model(images)
-            loss = bce(logits, masks) + dice_loss(logits, masks)
+            outputs = model(images)
+            mask_logits = outputs["mask"]
+            heatmap_logits = outputs["keypoints"]
+            mask_loss = bce(mask_logits, masks) + dice_loss(mask_logits, masks)
+            heatmap_loss = bce(heatmap_logits, heatmaps)
+            loss = mask_loss + args.heatmap_loss_weight * heatmap_loss
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         total_loss += float(loss.detach().cpu())
         steps += 1
         iterator.set_postfix(loss=total_loss / steps)
-        if max_steps is not None and steps >= max_steps:
+        if args.max_steps is not None and steps >= args.max_steps:
             break
     return total_loss / max(steps, 1)
 
 
 @torch.no_grad()
-def _validate(model: TinyUNet, loader: DataLoader | None, device: torch.device) -> float:
+def _validate(model: TinyUNet, loader: DataLoader | None, device: torch.device) -> tuple[float, float]:
     if loader is None:
-        return 0.0
+        return 0.0, 0.0
     model.eval()
-    total = 0.0
+    total_iou = 0.0
+    total_kp_error = 0.0
     steps = 0
-    for images, masks in loader:
+    for images, masks, heatmaps in loader:
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
-        logits = model(images)
-        total += float(mask_iou(logits, masks).cpu())
+        heatmaps = heatmaps.to(device, non_blocking=True)
+        outputs = model(images)
+        total_iou += float(mask_iou(outputs["mask"], masks).cpu())
+        total_kp_error += float(heatmap_peak_error(outputs["keypoints"], heatmaps).cpu())
         steps += 1
-    return total / max(steps, 1)
+    return total_iou / max(steps, 1), total_kp_error / max(steps, 1)
 
 
 def _select_device(name: str, require_cuda: bool) -> torch.device:
@@ -144,6 +162,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--heatmap-sigma", type=float, default=3.0)
+    parser.add_argument("--heatmap-loss-weight", type=float, default=1.0)
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
     return parser.parse_args()

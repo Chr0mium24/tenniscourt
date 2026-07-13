@@ -4,6 +4,12 @@
 
 项目背景：已有 OpenCV 相机标定；机器人相机离地约 40 cm；主要看到网球场半场；目标是生成相机仿真视频和可用于训练/验证的球场几何真值。
 
+## 范围修正：场地线检测可行性优先
+
+如果当前目标只是验证“合成图训练场地线检测模型是否可行”，第一阶段不需要完整 3D 引擎。优先使用 OpenCV 几何投影仿真器：直接用真实 K/D、相机外参和标准球场线坐标生成 RGB 图、line mask、2D 线段和关键点真值。详见 [`line-detection-simulation-recommendation.md`](line-detection-simulation-recommendation.md)。
+
+Blender/BlenderProc 仍然适合作为第二阶段，用于增强真实光照、材质、阴影、球网、围栏和遮挡。
+
 ## 结论
 
 有成熟的现代方案，但需要按目标选择：

@@ -68,6 +68,14 @@ Use `--supersample 1` for faster preview or `--supersample 3` for smoother edges
 To overlay live model keypoint predictions in the same viewer:
 
 ```bash
+./start_gui.sh
+```
+
+This starts the viewer with `runs/v6/best.pt` by default. If the checkpoint is missing, the script fetches it from the configured remote path first.
+
+Equivalent explicit command:
+
+```bash
 uv run --extra viewer --extra train tenniscourt-viewer \
   --width 640 \
   --height 360 \
